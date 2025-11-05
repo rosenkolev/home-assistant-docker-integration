@@ -10,12 +10,21 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import _LOGGER, COORDINATOR, DOMAIN
 from .coordinator import DockerDataUpdateCoordinator
+from .frontend import async_register_frontend_panel
 
 PLATFORMS = [Platform.SENSOR]
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):
+    await async_register_frontend_panel(
+        hass,
+        "www/docker_dashboard_panel.js",
+        name="docker-dashboard",
+        title="Docker Dashboard",
+        icon="mdi:server",
+    )
+
     if not hass.config_entries.async_entries(DOMAIN):
         # We avoid creating an import flow if its already
         # setup since it will have to import the config_flow

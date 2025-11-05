@@ -10,16 +10,15 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
 
-async def async_register_frontend(hass: HomeAssistant) -> None:
-    """Register the frontend."""
-    path = Path(__file__).parent / "www" / "my_demo.js"
-    url = f"/hacsfiles/{DOMAIN}/my_demo.js"
+async def async_register_frontend_panel(
+    hass: HomeAssistant, path: str, name: str, title: str, icon: str
+) -> None:
+    abs_path = Path(__file__).parent / path
+    url = f"/hacsfiles/{DOMAIN}/{path}"
 
-    await hass.http.async_register_static_paths([StaticPathConfig(url, path, True)])
-
+    await hass.http.async_register_static_paths([StaticPathConfig(url, abs_path, True)])
     add_extra_js_url(hass, url)
 
-    # Add to sidepanel if needed
     if DOMAIN not in hass.data.get("frontend_panels", {}):
         async_register_built_in_panel(
             hass,
@@ -29,8 +28,8 @@ async def async_register_frontend(hass: HomeAssistant) -> None:
             frontend_url_path=DOMAIN,
             config={
                 "_panel_custom": {
-                    "name": "hacs-frontend",
-                    "embed_iframe": True,
+                    "name": name,
+                    "embed_iframe": False,
                     "trust_external": False,
                     "js_url": url,
                 }
