@@ -1,43 +1,148 @@
 import asyncio
-import docker
+from dataclasses import dataclass
 from datetime import timedelta
 
+import docker
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, _LOGGER
-from .entity import DockerHostConfigEntry
+from .const import _LOGGER, DOMAIN
 
-class DockerDataUpdateCoordinator(DataUpdateCoordinator):
-    """Data update coordinator for integration"""
+SCAN_INTERVAL = timedelta(seconds=5)
 
-    def __init__(self, hass: HomeAssistant, config_entry: DockerHostConfigEntry) -> None:
-        super().__init__(hass, _LOGGER, name=DOMAIN, update_method=self._update_local, update_interval=timedelta(seconds=2))
-        self.entity_id = config_entry.entry_id;
-        self.data = {}
-        self.client = None
+
+@dataclass(kw_only=True)
+class DockerContainerInfo:
+    id: str
+    name: str
+    status: str
+    image: str
+    short_id: str
+
+
+@dataclass(kw_only=True)
+class DockerHostInfo:
+    version: str
+    containers_total: int
+    containers_running: int
+    images: int
+    firewall: str
+    containers: dict[str, DockerContainerInfo]
+
+
+class DockerApi:
+    def __init__(self):
+        self.base_url = "unix://var/run/docker.sock"
         self.loop = asyncio.get_running_loop()
+        self.client = None
 
-    async def initialize(self):
-        """Initialize the integration"""
-        await self.loop.run_in_executor(None, self._run_docker_info)
+    @property
+    def connected(self) -> bool:
+        return self.client is not None and isinstance(self.client, docker.DockerClient)
 
-    async def _update_local(self):
-        _LOGGER.debug("coordinator - start update_local")
-        #await self._api.poll_refresh()
-        _LOGGER.debug("coordinator - complete update_local")
-        return self.data
+    async def async_connect(self) -> None:
+        def docker_client_init(obj):
+            obj.client = docker.DockerClient(base_url=obj.base_url)
 
-    async def disconnect(self):
-        """disconnect from api"""
-        if self.client is not None:
+        await self.loop.run_in_executor(None, docker_client_init, self)
+
+    async def async_fetch_data(self):
+        def docker_data(client):
+            info = client.info()
+            containers = client.list(all=True)
+            return DockerHostInfo(
+                version=info["ServerVersion"],
+                firewall=info["FirewallBackend"]["Driver"],
+                containers_total=info["Containers"],
+                containers_running=info["ContainersRunning"],
+                images=info["Images"],
+                containers=map(
+                    lambda x: DockerContainerInfo(
+                        id=x.id, name=x.name, status=x.status, image=x.image
+                    ),
+                    containers,
+                ),
+            )
+
+        return await self.loop.run_in_executor(None, docker_data, self.client)
+
+    def disconnect(self):
+        if self.connected:
             self.client.close()
             self.client = None
 
-        await self.async_shutdown()
 
-    def _run_docker_info(self) -> None:
-        self.client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-        _LOGGER.warning(self.client.version())
-        _LOGGER.warning(self.client.info())
+class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
+    """Data update coordinator for integration"""
+
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=config_entry,
+            name=DOMAIN,
+            update_method=self._api.async_fetch_data,
+            update_interval=SCAN_INTERVAL,
+        )
+
+        self._api = DockerApi()
+        self._containers: set[str] = set()
+        self.new_containers: set[str] = set()
+
+    async def _async_update_data(self) -> DockerHostInfo:
+        self.new_containers.clear()
+
+        if not self._api.connected:
+            await self._api.async_connect()
+
+        data = await self._api.async_fetch_data()
+        self._async_add_remove_containers(data.containers)
+
+        return data
+
+    def _async_add_remove_containers(
+        self, containers: list[DockerContainerInfo]
+    ) -> None:
+        container_names = set(map(lambda x: x.name, containers))
+        self.new_containers = container_names - self._containers
+        self._current_devices = container_names
+
+        if len(self._containers - container_names):
+            # Remove containers that don't exists
+            self._async_remove_devices(container_names)
+
+    def _async_remove_devices(self, data: set[str]) -> None:
+        """Clean registries when removed devices found."""
+        service_id = self.config_entry.entry_id
+        device_reg = dr.async_get(self.hass)
+        device_list = dr.async_entries_for_config_entry(device_reg, service_id)
+
+        # Find the container entities
+        gateway_device = device_reg.async_get_device({(DOMAIN, service_id)})
+        assert gateway_device is not None
+        via_device_id = gateway_device.id
+
+        # Then remove the connected orphaned device(s)
+        for device_entry in device_list:
+            for domain_name, entry_id in enumerate(device_entry.identifiers):
+                if (
+                    domain_name == DOMAIN
+                    and device_entry.via_device_id == via_device_id
+                    and entry_id not in data
+                ):
+                    device_reg.async_update_device(
+                        device_entry.id,
+                        remove_config_entry_id=self.config_entry.entry_id,
+                    )
+                    _LOGGER.debug(
+                        "Removed %s device %s %s from device_registry",
+                        DOMAIN,
+                        device_entry.model,
+                        entry_id,
+                    )
+
+    async def async_disconnect(self):
+        self._api.disconnect()
+        await self.async_shutdown()

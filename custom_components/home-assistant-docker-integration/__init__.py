@@ -1,17 +1,19 @@
 """Load Platform integration."""
 
-from homeassistant.helpers.typing import ConfigType
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-#from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, _LOGGER
+from .const import _LOGGER, COORDINATOR, DOMAIN
 from .coordinator import DockerDataUpdateCoordinator
-from .entity import DockerHost, DockerHostConfigEntry
 
-PLATFORMS = []
-COORDINATOR = "COORDINATOR"
-DOCKER_HOST = "DOCKER_HOST"
+PLATFORMS = [Platform.SENSOR]
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):
     if not hass.config_entries.async_entries(DOMAIN):
@@ -28,50 +30,37 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
 
     return True
 
-async def async_setup_entry(hass: HomeAssistant, entry: DockerHostConfigEntry) -> bool:
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug(f"__init__ async_setup_entry {entry.entry_id}")
 
-    #async_register_docker_hub(hass, entry.entry_id)
-    hass_domain_data = hass.data.setdefault(DOMAIN, {})
+    # init coordinator and fetch initial data
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    coordinator = domain_data[COORDINATOR] = DockerDataUpdateCoordinator(hass, entry)
+    await coordinator.async_config_entry_first_refresh()
 
-    coordinator = hass_domain_data[COORDINATOR] = DockerDataUpdateCoordinator(hass, entry)
-    await coordinator.initialize()
+    # set coordinator to entity for easy access
+    entry.runtime_data = coordinator
 
-    host = hass_domain_data[DOCKER_HOST] = DockerHost(hass)
-    component = EntityComponent[DockerHost](_LOGGER, DOMAIN, hass)
-    await component.async_add_entities([host])
-    entry.runtime_data = host
-    entry.async_on_unload(host.remove_listeners)
+    # register (update) service information
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        entry_type=DeviceEntryType.SERVICE,
+        name="Docker Host",
+        sw_version=coordinator.data.version,
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
-async def async_unload_entry(hass: HomeAssistant, entry: DockerHostConfigEntry) -> bool:
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug(f"__init__ async_unload_entry {entry.entry_id}")
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        await hass.data[DOMAIN][COORDINATOR].disconnect()
-        await hass.data[DOMAIN][DOCKER_HOST].async_remove()
+        await hass.data[DOMAIN][COORDINATOR].async_disconnect()
         hass.data[DOMAIN] = {}
 
     return unload_ok
-
-# async def async_register_docker_hub(hass: HomeAssistant, hub_id: str):
-#     hub = DockerHub(hub_id)
-#     hass.data.setdefault(DOMAIN, hub)
-
-#     # connect
-#     _LOGGER.info("autoconnect")
-#     hub.auto_connect()
-
-#     # register
-#     device_registry = dr.async_get(hass)
-#     device_registry.async_get_or_create(
-#         config_entry_id=hub_id,
-#         identifiers={(DOMAIN, hub.entity_id)},
-#         manufacturer="Local",
-#         name="Docker",
-#         model="v1",
-#         sw_version=hub.firmware_version,
-#         hw_version=hub.hardware_version,
-#     )

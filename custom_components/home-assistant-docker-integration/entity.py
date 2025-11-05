@@ -1,38 +1,37 @@
-from typing import Any
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity import Entity
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-type DockerHostConfigEntry = ConfigEntry[DockerHost]
+from .const import DOMAIN
+from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
 
-STATE_ATTR_CPU = "cpu_usage"
-STATE_ATTR_MEMORY = "memory_usage"
 
-class DockerHost(Entity):
-    _unrecorded_attributes = frozenset(
-        {
-            STATE_ATTR_CPU,
-            STATE_ATTR_MEMORY,
-        }
-    )
+class ContainerEntity(CoordinatorEntity[DockerDataUpdateCoordinator]):
+    _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        self._attr_name = "Docker Host"
-        self._attr_unique_id = "docker_integration_docker_host"
-        self._attr_has_entity_name = True
+    def __init__(
+        self,
+        coordinator: DockerDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        """Initialise the entity."""
+        super().__init__(coordinator)
+        self._dev_id = device_id
+
+        dev = self.device
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_id)},
+            model=dev.image,
+            model_id=dev.id,
+            name=dev.name,
+            via_device=(DOMAIN, coordinator.config_entry.entry_id),
+        )
 
     @property
-    def state(self) -> str:
-        return "v12.0"
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._dev_id in self.coordinator.data.containers and super().available
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the state attributes."""
-        return {
-            STATE_ATTR_CPU: "5%",
-            STATE_ATTR_MEMORY: "13%",
-        }
-
-    @callback
-    def remove_listeners(self) -> None:
-        """Remove listeners."""
+    def device(self) -> DockerContainerInfo:
+        """Return data for this device."""
+        return self.coordinator.data.containers[self._dev_id]
