@@ -20,8 +20,8 @@ class ContainerEntity(CoordinatorEntity[DockerDataUpdateCoordinator]):
         dev = self.device
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
-            model=dev.image,
-            model_id=dev.id,
+            model=dev.image_name,
+            # model_id=dev.image_id,
             name=dev.name,
             via_device=(DOMAIN, coordinator.config_entry.entry_id),
         )

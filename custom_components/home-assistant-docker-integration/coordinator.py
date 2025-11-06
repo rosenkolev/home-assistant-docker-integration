@@ -18,8 +18,10 @@ class DockerContainerInfo:
     id: str
     name: str
     status: str
-    image: str
+    image_id: str
+    image_name: str
     short_id: str
+    ports: list[str]
 
 
 @dataclass(kw_only=True)
@@ -51,18 +53,29 @@ class DockerApi:
     async def async_fetch_data(self):
         def docker_data(client):
             info = client.info()
-            containers = client.list(all=True)
+            containers = client.containers.list(all=True)
             return DockerHostInfo(
                 version=info["ServerVersion"],
                 firewall=info["FirewallBackend"]["Driver"],
                 containers_total=info["Containers"],
                 containers_running=info["ContainersRunning"],
                 images=info["Images"],
-                containers=map(
-                    lambda x: DockerContainerInfo(
-                        id=x.id, name=x.name, status=x.status, image=x.image
-                    ),
-                    containers,
+                containers=dict(
+                    map(
+                        lambda x: (
+                            x.short_id,
+                            DockerContainerInfo(
+                                id=x.id,
+                                name=x.name,
+                                status=x.status,
+                                short_id=x.short_id,
+                                image_id=x.attrs["Image"],
+                                image_name=x.attrs["Config"]["Image"],
+                                ports=["xxx"],
+                            ),
+                        ),
+                        containers,
+                    )
                 ),
             )
 
@@ -83,7 +96,6 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
             _LOGGER,
             config_entry=config_entry,
             name=DOMAIN,
-            update_method=self._api.async_fetch_data,
             update_interval=SCAN_INTERVAL,
         )
 
@@ -103,15 +115,17 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
         return data
 
     def _async_add_remove_containers(
-        self, containers: list[DockerContainerInfo]
+        self, containers: dict[str, DockerContainerInfo]
     ) -> None:
-        container_names = set(map(lambda x: x.name, containers))
+        container_names = set(containers.keys())
         self.new_containers = container_names - self._containers
-        self._current_devices = container_names
 
         if len(self._containers - container_names):
             # Remove containers that don't exists
             self._async_remove_devices(container_names)
+
+        # update current
+        self._containers = container_names
 
     def _async_remove_devices(self, data: set[str]) -> None:
         """Clean registries when removed devices found."""

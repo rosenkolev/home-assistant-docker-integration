@@ -11,27 +11,26 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .const import COORDINATOR, DOMAIN
+from .const import _LOGGER, COORDINATOR, DOMAIN
 from .coordinator import DockerDataUpdateCoordinator
 from .entity import ContainerEntity
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
-        key="containers",
-        state_class=SensorStateClass.MEASUREMENT,
+        key="containers_total",
     ),
     SensorEntityDescription(
-        key="cpu",
-        device_class=SensorDeviceClass.POWER_FACTOR,
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
+        key="containers_running",
     ),
     SensorEntityDescription(
-        key="memory",
-        device_class=SensorDeviceClass.POWER_FACTOR,
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
+        key="images",
     ),
+    # SensorEntityDescription(
+    #     key="images",
+    #     device_class=SensorDeviceClass.POWER_FACTOR,
+    #     native_unit_of_measurement=PERCENTAGE,
+    #     state_class=SensorStateClass.MEASUREMENT,
+    # ),
 )
 
 
@@ -93,6 +92,11 @@ class DockerContainerSensor(ContainerEntity, SensorEntity):
         """Return the value reported by the sensor."""
         return self.device.status
 
+    @property
+    def extra_state_attributes(self):
+        dev = self.device
+        return {"id": dev.id, "sid": dev.short_id, "ports": dev.ports}
+
 
 class DockerDiagnosticSensor(SensorEntity):
     """Representation of a Sensor."""
@@ -126,7 +130,7 @@ class DockerDiagnosticSensor(SensorEntity):
     @property
     def native_value(self) -> StateType:
         """Return value of sensor."""
-        return self._coordinator.data[self.entity_description.key]
+        return getattr(self._coordinator.data, self.entity_description.key)
 
     async def async_update(self) -> None:
         """Update the entity."""
