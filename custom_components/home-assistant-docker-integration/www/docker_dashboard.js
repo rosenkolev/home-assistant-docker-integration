@@ -1,10 +1,11 @@
 class StrategyViewDockerContainers {
   static async generate(config, hass) {
+    const DOMAIN = 'docker_integration';
     const [devices, entities] = await Promise.all([
       hass.callWS({ type: "config/device_registry/list" }),
       hass.callWS({ type: "config/entity_registry/list" }),
     ]);
-    const containers = entities.filter(it => it.entity_id.startsWith("sensor.docker_container_"))
+    const containers = entities.filter(it => it.entity_id.includes(".docker_integration_"));
     if (containers) { console.log(containers[0]) }
     return {
       "sections": [

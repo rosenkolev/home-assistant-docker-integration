@@ -17,15 +17,15 @@ from .entity import ContainerEntity
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
-        name="Docker Containers"
+        name="Docker Containers",
         key="containers_total",
     ),
     SensorEntityDescription(
-        name="Docker Running Containers"
+        name="Docker Running Containers",
         key="containers_running",
     ),
     SensorEntityDescription(
-        name="Docker Images"
+        name="Docker Images",
         key="images",
     ),
     # SensorEntityDescription(
@@ -58,7 +58,7 @@ async def async_setup_entry(
             return
 
         async_add_entities(
-            DockerContainerSensor(coordinator, device_id, entry.entry_id)
+            DockerContainerSensor(coordinator, device_id)
             for device_id in coordinator.new_containers
         )
 
@@ -85,17 +85,16 @@ class DockerContainerSensor(ContainerEntity, SensorEntity):
         self,
         coordinator: DockerDataUpdateCoordinator,
         device_id: str,
-        entry_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_name=f"Container {self.device.name} status"
-        self._attr_unique_id = f"{entry_id}_{device_id}_status"
+        self._attr_name = f"Container {self.device.name} status"
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_status"
 
     @property
     def native_value(self) -> int | float:
         """Return the value reported by the sensor."""
         return self.device.status
-    
+
     @property
     def extra_state_attributes(self):
         dev = self.device
@@ -116,9 +115,7 @@ class DockerDiagnosticSensor(SensorEntity):
     ) -> None:
         """Initiate Sun Sensor."""
         self.entity_description = entity_description
-        self.entity_id = f"{DOMAIN}.{entry_id}_{entity_description.key}"
-
-        self._attr_unique_id = f"{entry_id}-{entity_description.key}"
+        self._attr_unique_id = f"{DOMAIN}_{entity_description.key}"
         self._coordinator = coordinator
         self._attr_device_info = DeviceInfo(
             name="Docker Host",
