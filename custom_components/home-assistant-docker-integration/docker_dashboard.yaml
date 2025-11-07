@@ -1,4 +1,29 @@
 views:
   - title: Containers
+    badges:
+      - type: entity
+        show_name: true
+        show_state: true
+        show_icon: true
+        entity: sensor.sub_containers_total
+        icon: mdi:train-car-container
+        name: Containers
+      - type: entity
+        show_name: true
+        show_state: true
+        show_icon: true
+        entity: sensor.sub_containers_running
+        icon: mdi:play-circle
+        show_entity_picture: false
+        tap_action:
+          action: none
+        name: Running Containers
+      - type: entity
+        show_name: true
+        show_state: true
+        show_icon: true
+        entity: sensor.sub_images
+        name: Docker Images
+        icon: mdi:archive
     strategy:
       type: custom:docker-containers

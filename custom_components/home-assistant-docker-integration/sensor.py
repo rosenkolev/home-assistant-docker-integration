@@ -17,12 +17,15 @@ from .entity import ContainerEntity
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
+        name="Docker Containers"
         key="containers_total",
     ),
     SensorEntityDescription(
+        name="Docker Running Containers"
         key="containers_running",
     ),
     SensorEntityDescription(
+        name="Docker Images"
         key="images",
     ),
     # SensorEntityDescription(
@@ -85,17 +88,18 @@ class DockerContainerSensor(ContainerEntity, SensorEntity):
         entry_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
+        self._attr_name=f"Container {self.device.name} status"
         self._attr_unique_id = f"{entry_id}_{device_id}_status"
 
     @property
     def native_value(self) -> int | float:
         """Return the value reported by the sensor."""
         return self.device.status
-
+    
     @property
     def extra_state_attributes(self):
         dev = self.device
-        return {"id": dev.id, "sid": dev.short_id, "ports": dev.ports}
+        return {"id": dev.id, "sid": dev.short_id}
 
 
 class DockerDiagnosticSensor(SensorEntity):
@@ -112,7 +116,7 @@ class DockerDiagnosticSensor(SensorEntity):
     ) -> None:
         """Initiate Sun Sensor."""
         self.entity_description = entity_description
-        self.entity_id = f"{DOMAIN}.sub_{entity_description.key}"
+        self.entity_id = f"{DOMAIN}.{entry_id}_{entity_description.key}"
 
         self._attr_unique_id = f"{entry_id}-{entity_description.key}"
         self._coordinator = coordinator
