@@ -119,13 +119,11 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
     ) -> None:
         container_names = set(containers.keys())
         self.new_containers = container_names - self._containers
+        self._containers = container_names
 
         if len(self._containers - container_names):
             # Remove containers that don't exists
             self._async_remove_devices(container_names)
-
-        # update current
-        self._containers = container_names
 
     def _async_remove_devices(self, data: set[str]) -> None:
         """Clean registries when removed devices found."""

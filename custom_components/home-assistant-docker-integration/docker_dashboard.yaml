@@ -1,0 +1,4 @@
+views:
+  - title: Containers
+    strategy:
+      type: custom:docker-containers
