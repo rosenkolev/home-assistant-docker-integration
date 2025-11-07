@@ -1,4 +1,7 @@
 from homeassistant.components.sensor import (
+    DOMAIN as SENSOR_DOMAIN,
+)
+from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -87,8 +90,9 @@ class DockerContainerSensor(ContainerEntity, SensorEntity):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_name = f"Container {self.device.name} status"
-        self._attr_unique_id = f"{DOMAIN}_{device_id}_status"
+        self._attr_name = self.device.name
+        self._attr_unique_id = f"{DOMAIN}_container_{device_id}_status"
+        self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int | float:
@@ -115,7 +119,8 @@ class DockerDiagnosticSensor(SensorEntity):
     ) -> None:
         """Initiate Sun Sensor."""
         self.entity_description = entity_description
-        self._attr_unique_id = f"{DOMAIN}_{entity_description.key}"
+        self._attr_unique_id = f"{DOMAIN}_host_{entity_description.key}"
+        self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
         self._coordinator = coordinator
         self._attr_device_info = DeviceInfo(
             name="Docker Host",

@@ -5,7 +5,7 @@ class StrategyViewDockerContainers {
       hass.callWS({ type: "config/device_registry/list" }),
       hass.callWS({ type: "config/entity_registry/list" }),
     ]);
-    const containers = entities.filter(it => it.entity_id.includes(".docker_integration_"));
+    const containers = entities.filter(it => it.entity_id.includes(".docker_integration_container_"));
     if (containers) { console.log(containers[0]) }
     return {
       "sections": [

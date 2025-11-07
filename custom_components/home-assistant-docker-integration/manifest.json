@@ -1,7 +1,7 @@
 {
   "domain": "docker_integration",
   "name": "Docker Integration",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "requirements": [
     "docker==7.1.0"
   ],

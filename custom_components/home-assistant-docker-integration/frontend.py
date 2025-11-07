@@ -24,7 +24,7 @@ from .const import _LOGGER, DOMAIN
 
 async def async_register_frontend(hass: HomeAssistant):
     url = await async_register_static_path(hass, "www/docker_dashboard.js")
-    await async_add_or_update_resource(hass, url, "0.4")
+    await async_add_or_update_resource(hass, url, "0.8")
 
     if DOMAIN not in hass.data.get("frontend_panels", {}):
         add_dashboard_yaml_config(
