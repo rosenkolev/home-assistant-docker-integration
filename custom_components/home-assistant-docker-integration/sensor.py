@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from typing import Any, Callable
+
 from homeassistant.components.sensor import (
     DOMAIN as SENSOR_DOMAIN,
 )
@@ -8,15 +11,21 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .const import _LOGGER, COORDINATOR, DOMAIN
-from .coordinator import DockerDataUpdateCoordinator
+from .const import COORDINATOR, DOMAIN
+from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
 from .entity import ContainerEntity
+
+
+@dataclass(frozen=True, kw_only=True)
+class ContainerEntityDescription(SensorEntityDescription):
+    get_fn: Callable[[DockerContainerInfo], Any]
+
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -31,12 +40,11 @@ DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
         name="Docker Images",
         key="images",
     ),
-    # SensorEntityDescription(
-    #     key="images",
-    #     device_class=SensorDeviceClass.POWER_FACTOR,
-    #     native_unit_of_measurement=PERCENTAGE,
-    #     state_class=SensorStateClass.MEASUREMENT,
-    # ),
+)
+
+CONTAINER_SENSOR_TYPES: tuple[ContainerEntityDescription, ...] = (
+    # ContainerEntityDescription(key="status", get_fn=lambda x: x.status),
+    ContainerEntityDescription(key="health", get_fn=lambda x: x.health),
 )
 
 
@@ -57,12 +65,13 @@ async def async_setup_entry(
     @callback
     def _add_container_entities() -> None:
         """Add Entities."""
-        if not coordinator.new_containers:
+        if not coordinator.new_device_ids:
             return
 
         async_add_entities(
-            DockerContainerSensor(coordinator, device_id)
-            for device_id in coordinator.new_containers
+            DockerContainerSensor(coordinator, device_id, entity_description)
+            for device_id in coordinator.new_device_ids
+            for entity_description in CONTAINER_SENSOR_TYPES
         )
 
     _add_container_entities()
@@ -84,20 +93,24 @@ async def async_setup_entry(
 
 
 class DockerContainerSensor(ContainerEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
     def __init__(
         self,
         coordinator: DockerDataUpdateCoordinator,
         device_id: str,
+        description: ContainerEntityDescription,
     ) -> None:
-        super().__init__(coordinator, device_id)
-        self._attr_name = self.device.name
-        self._attr_unique_id = f"{DOMAIN}_container_{device_id}_status"
+        super().__init__(coordinator, device_id, description.key)
+        self._attr_name = f"{self.device.name} {description.key}"
+        self.entity_description = description
         self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int | float:
         """Return the value reported by the sensor."""
-        return self.device.status
+        return self.entity_description.get_fn(self.device)
 
     @property
     def extra_state_attributes(self):
