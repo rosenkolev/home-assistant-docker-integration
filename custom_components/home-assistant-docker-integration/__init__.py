@@ -12,7 +12,7 @@ from .const import _LOGGER, COORDINATOR, DOMAIN
 from .coordinator import DockerDataUpdateCoordinator
 from .frontend import async_register_frontend
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
