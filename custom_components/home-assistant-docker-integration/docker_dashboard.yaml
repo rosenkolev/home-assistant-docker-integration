@@ -5,14 +5,14 @@ views:
         show_name: true
         show_state: true
         show_icon: true
-        entity: sensor.sub_containers_total
+        entity: sensor.docker_integration_host_containers_total
         icon: mdi:train-car-container
         name: Containers
       - type: entity
         show_name: true
         show_state: true
         show_icon: true
-        entity: sensor.sub_containers_running
+        entity: sensor.docker_integration_host_containers_running
         icon: mdi:play-circle
         show_entity_picture: false
         tap_action:
@@ -22,7 +22,7 @@ views:
         show_name: true
         show_state: true
         show_icon: true
-        entity: sensor.sub_images
+        entity: sensor.docker_integration_host_images_total
         name: Docker Images
         icon: mdi:archive
     strategy:
