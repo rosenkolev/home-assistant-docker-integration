@@ -60,3 +60,21 @@ class BaseDeviceEntity[TDevice](CoordinatorEntity[DockerDataUpdateCoordinator]):
     def device(self) -> TDevice:
         """Return data for this device."""
         return self._dataset.get(self._id)
+
+
+def create_volumes_device_info(coordinator: DockerDataUpdateCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, "docker_integration_volumes")},
+        model="volume",
+        name="Local Docker Volumes",
+        via_device=(DOMAIN, coordinator.config_entry.entry_id),
+    )
+
+
+def create_images_device_info(coordinator: DockerDataUpdateCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, "docker_integration_images")},
+        model="image",
+        name="Local Docker Images",
+        via_device=(DOMAIN, coordinator.config_entry.entry_id),
+    )

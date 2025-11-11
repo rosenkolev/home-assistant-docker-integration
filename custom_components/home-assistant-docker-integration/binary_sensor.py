@@ -6,7 +6,11 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import COORDINATOR, DOMAIN
 from .coordinator import DockerDataUpdateCoordinator, DockerImageInfo, DockerVolumeInfo
-from .entity import BaseDeviceEntity
+from .entity import (
+    BaseDeviceEntity,
+    create_images_device_info,
+    create_volumes_device_info,
+)
 
 
 async def async_setup_entry(
@@ -52,7 +56,7 @@ class DockerImageSensor(BaseDeviceEntity[DockerImageInfo], BinarySensorEntity):
         )
 
         self._init_entity_id(BINARY_SENSOR_DOMAIN)
-        self._init_device_info("docker_integration_images", "Local Images")
+        self._attr_device_info = create_images_device_info(coordinator)
 
     @property
     def is_on(self) -> bool:
@@ -84,7 +88,7 @@ class DockerVolumeSensor(BaseDeviceEntity[DockerVolumeInfo], BinarySensorEntity)
         )
 
         self._init_entity_id(BINARY_SENSOR_DOMAIN)
-        self._init_device_info("docker_integration_volumes", "Local Volumes")
+        self._attr_device_info = create_volumes_device_info(coordinator)
 
     @property
     def is_on(self) -> bool:

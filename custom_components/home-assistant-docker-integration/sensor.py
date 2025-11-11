@@ -5,19 +5,14 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, ServiceCall, callback
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .const import _LOGGER, COORDINATOR, DOMAIN
+from .const import COORDINATOR, DOMAIN
 from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
 from .entity import BaseDeviceEntity
-
-# @dataclass(frozen=True, kw_only=True)
-# class ContainerEntityDescription(SensorEntityDescription):
-#     get_fn: Callable[[DockerContainerInfo], Any]
-
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -34,11 +29,6 @@ DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     ),
 )
 
-# CONTAINER_SENSOR_TYPES: tuple[ContainerEntityDescription, ...] = (
-#     ContainerEntityDescription(key="status", get_fn=lambda x: x.status),
-#     ContainerEntityDescription(key="health", get_fn=lambda x: x.health),
-# )
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -50,7 +40,7 @@ async def async_setup_entry(
     coordinator: DockerDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
 
     async_add_entities(
-        DockerDiagnosticSensor(coordinator, entity_description, entry.entry_id)
+        DockerDiagnosticSensor(coordinator, entity_description)
         for entity_description in DOCKER_SENSOR_TYPES
     )
 
@@ -66,18 +56,6 @@ async def async_setup_entry(
     # listen for new containers
     _add_container_entities()
     entry.async_on_unload(coordinator.async_add_listener(_add_container_entities))
-
-
-# async def async_setup_platform(
-#     hass: HomeAssistant, config, async_add_entities, discovery_info=None
-# ):
-#     sensor = MyDynamicSensor()
-#     async_add_entities([sensor])
-
-#     async def handle_next_state(call: ServiceCall):
-#         await sensor.async_next_state()
-
-#     hass.services.async_register(DOMAIN, "next_state", handle_next_state)
 
 
 class DockerContainerStatusSensor(BaseDeviceEntity[DockerContainerInfo], SensorEntity):
@@ -125,7 +103,6 @@ class DockerDiagnosticSensor(SensorEntity):
         self,
         coordinator: DockerDataUpdateCoordinator,
         entity_description: SensorEntityDescription,
-        entry_id: str,
     ) -> None:
         """Initiate Sun Sensor."""
         self.entity_description = entity_description
@@ -133,9 +110,7 @@ class DockerDiagnosticSensor(SensorEntity):
         self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
         self._coordinator = coordinator
         self._attr_device_info = DeviceInfo(
-            name="Docker Host",
-            identifiers={(DOMAIN, entry_id)},
-            entry_type=DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, coordinator.config_entry.entry_id)}
         )
 
     @property

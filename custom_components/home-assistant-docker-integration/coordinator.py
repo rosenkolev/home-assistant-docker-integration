@@ -169,11 +169,9 @@ class DockerApi:
 
     def async_test(self):
         def action(client):
-            pass
             # df = client.df()
             # _LOGGER.warning(df)
-            # data = client.images.list()
-            # _LOGGER.warning(data[0])
+            pass
 
         return self.loop.run_in_executor(None, action, self.client)
 
@@ -193,6 +191,59 @@ class DockerApi:
             lambda client, id: client.containers.get(id).restart(),
             self.client,
             id,
+        )
+
+    def async_container_remove(self, id: str, remove_volumes=False):
+        return self.loop.run_in_executor(
+            None,
+            lambda client, id, volumes: client.containers.get(id).remove(v=volumes),
+            self.client,
+            id,
+            remove_volumes,
+        )
+
+    def async_container_create(
+        self,
+        image: str,
+        name: str = None,
+        ports: dict = None,
+        network: str = None,
+        volumes: list = None,
+    ):
+        return self.loop.run_in_executor(
+            None,
+            lambda client, image, name, ports, network, volumes: client.containers.create(
+                image,
+                detach=True,
+                name=name,
+                ports=ports,
+                network=network,
+                volumes=volumes,
+            ),
+            self.client,
+            image,
+            name,
+            ports,
+            network,
+            volumes,
+        )
+
+    def async_volumes_prune(self):
+        return self.loop.run_in_executor(
+            None, lambda client: client.volumes.prune(), self.client
+        )
+
+    def async_images_prune(self, dangling=False):
+        return self.loop.run_in_executor(
+            None,
+            lambda client, dangling: client.images.prune({"dangling": dangling}),
+            self.client,
+            dangling,
+        )
+
+    def async_containers_prune(self):
+        return self.loop.run_in_executor(
+            None, lambda client: client.containers.prune(), self.client
         )
 
     def disconnect(self):
