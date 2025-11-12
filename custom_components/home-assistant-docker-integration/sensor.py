@@ -12,7 +12,7 @@ from homeassistant.helpers.typing import StateType
 
 from .const import COORDINATOR, DOMAIN
 from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
-from .entity import BaseDeviceEntity
+from .entity import BaseDeviceEntity, create_containers_device_info
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -73,7 +73,7 @@ class DockerContainerStatusSensor(BaseDeviceEntity[DockerContainerInfo], SensorE
         )
 
         self._init_entity_id(SENSOR_DOMAIN)
-        self._init_device_info(device_id, dev.name, dev.image_name)
+        self._attr_device_info = create_containers_device_info(dev, coordinator)
 
     @property
     def native_value(self) -> str:

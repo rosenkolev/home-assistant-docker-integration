@@ -7,7 +7,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import COORDINATOR, DOMAIN
 from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
-from .entity import BaseDeviceEntity
+from .entity import BaseDeviceEntity, create_containers_device_info
 
 
 async def async_setup_entry(
@@ -51,7 +51,7 @@ class DockerContainerSwitch(BaseDeviceEntity[DockerContainerInfo], SwitchEntity)
         )
 
         self._init_entity_id(SWITCH_DOMAIN)
-        self._init_device_info(device_id, dev.name, dev.image_name)
+        self._attr_device_info = create_containers_device_info(dev, coordinator)
 
     @property
     def is_on(self) -> bool | None:

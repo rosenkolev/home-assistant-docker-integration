@@ -10,6 +10,7 @@ from .const import COORDINATOR, DOMAIN
 from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
 from .entity import (
     BaseDeviceEntity,
+    create_containers_device_info,
     create_images_device_info,
     create_volumes_device_info,
 )
@@ -66,7 +67,7 @@ class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity
         )
 
         self._init_entity_id(BUTTON_DOMAIN)
-        self._init_device_info(device_id, dev.name, model_id=dev.image_name)
+        self._attr_device_info = create_containers_device_info(dev, coordinator)
 
     async def async_press(self) -> None:
         """Handle the button press."""

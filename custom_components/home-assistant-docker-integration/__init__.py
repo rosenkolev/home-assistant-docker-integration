@@ -8,12 +8,16 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.typing import ConfigType
 
-from .const import _LOGGER, COORDINATOR, DOMAIN
-from .coordinator import DockerDataUpdateCoordinator
+from .const import _LOGGER, DOMAIN
+from .coordinator import ServiceController
 from .frontend import async_register_frontend
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.BINARY_SENSOR]
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+
+
+class DockerConfigEntry(ConfigEntry):
+    runtime_data: ServiceController
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):
@@ -34,16 +38,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: DockerConfigEntry) -> bool:
     _LOGGER.debug(f"__init__ async_setup_entry {entry.entry_id}")
 
-    # init coordinator and fetch initial data
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    coordinator = domain_data[COORDINATOR] = DockerDataUpdateCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
+    # init controller and fetch initial data
+    controller = ServiceController(hass, entry)
+    await controller.async_initialize()
 
-    # set coordinator to entity for easy access
-    entry.runtime_data = coordinator
+    # set controller to entity for easy access
+    entry.runtime_data = controller
 
     # register (update) service information
     device_registry = dr.async_get(hass)
@@ -51,19 +54,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, entry.entry_id)},
         entry_type=DeviceEntryType.SERVICE,
-        name="Docker Host",
-        sw_version=coordinator.data.version,
+        name=controller.name,
+        sw_version=controller.version,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: DockerConfigEntry) -> bool:
     _LOGGER.debug(f"__init__ async_unload_entry {entry.entry_id}")
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        await hass.data[DOMAIN][COORDINATOR].async_disconnect()
-        hass.data[DOMAIN] = {}
+        await entry.runtime_data.async_shutdown()
+        entry.runtime_data = None
 
     return unload_ok
