@@ -22,14 +22,14 @@ class BaseDeviceEntity[TDevice](CoordinatorEntity[DockerDataUpdateCoordinator]):
         self,
         coordinator: DockerDataUpdateCoordinator,
         id: str,
-        key: DOCKER_DATA_KEYS,
         name: str,
+        key: DOCKER_DATA_KEYS = "containers",
         sub_name: str = None,
     ):
         super().__init__(coordinator)
         self._id = id
         self._key = key
-        self._attr_name = name + to_suffix(sub_name)
+        self._attr_name = name + to_suffix(sub_name, " ")
         self._attr_has_entity_name = True
         self._attr_unique_id = get_unique_id(id, key, sub_name)
 

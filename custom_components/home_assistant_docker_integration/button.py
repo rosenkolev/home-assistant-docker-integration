@@ -1,12 +1,12 @@
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import COORDINATOR, DOMAIN
+from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
+from .const import DOMAIN
 from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
 from .entity import (
     BaseDeviceEntity,
@@ -18,12 +18,12 @@ from .entity import (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: DockerConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up button platform."""
 
-    coordinator: DockerDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
+    coordinator = entry.runtime_data.data_coordinator
 
     async_add_entities(
         [
@@ -33,18 +33,9 @@ async def async_setup_entry(
         ]
     )
 
-    @callback
-    def _add_container_entities() -> None:
-        """Add Entities."""
-        if coordinator.tracker.added_containers:
-            async_add_entities(
-                ContainerRestartButton(coordinator, device_id)
-                for device_id in coordinator.tracker.added_containers
-            )
-
-    # listen for new containers
-    _add_container_entities()
-    entry.async_on_unload(coordinator.async_add_listener(_add_container_entities))
+    auto_add_containers_devices(
+        entry, async_add_entities, lambda id, _: ContainerRestartButton(coordinator, id)
+    )
 
 
 class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity):
@@ -56,13 +47,11 @@ class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity
         coordinator: DockerDataUpdateCoordinator,
         device_id: str,
     ) -> None:
-        """Initialize the container."""
         dev = coordinator.data.containers.get(device_id)
         super().__init__(
             coordinator,
             device_id,
             name=dev.name,
-            key="containers",
             sub_name="restart",
         )
 
@@ -70,7 +59,6 @@ class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity
         self._attr_device_info = create_containers_device_info(dev, coordinator)
 
     async def async_press(self) -> None:
-        """Handle the button press."""
         await self.coordinator.api.async_container_restart(self._id)
 
 

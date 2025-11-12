@@ -1,11 +1,11 @@
 from homeassistant.components.update import DOMAIN as UPDATE_DOMAIN
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import DockerConfigEntry
 from ._api import DockerContainerInfo
+from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
 from .coordinator import DockerContainerVersionUpdateCoordinator
 from .entity import create_containers_device_info, get_unique_id
 
@@ -18,22 +18,14 @@ async def async_setup_entry(
     """Set up update platform."""
 
     update_coordinator = entry.runtime_data.update_coordinator
-    data_coordinator = entry.runtime_data.data_coordinator
 
-    @callback
-    def _add_container_entities() -> None:
-        """Add Entities."""
-        if data_coordinator.tracker.added_containers:
-            async_add_entities(
-                DockerContainerUpdate(
-                    update_coordinator, data_coordinator.data.containers.get(device_id)
-                )
-                for device_id in data_coordinator.tracker.added_containers
-            )
-
-    # listen for new containers
-    _add_container_entities()
-    entry.async_on_unload(data_coordinator.async_add_listener(_add_container_entities))
+    auto_add_containers_devices(
+        entry,
+        async_add_entities,
+        lambda id, coordinator: DockerContainerUpdate(
+            update_coordinator, coordinator.data.containers.get(id)
+        ),
+    )
 
 
 class DockerContainerUpdate(

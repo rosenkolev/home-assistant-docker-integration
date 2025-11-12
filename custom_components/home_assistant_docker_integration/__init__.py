@@ -1,6 +1,6 @@
 """Load Platform integration."""
 
-from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.config_entries import SOURCE_IMPORT
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
@@ -8,16 +8,13 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.typing import ConfigType
 
+from ._ha_helpers import DockerConfigEntry
 from .const import _LOGGER, DOMAIN
 from .coordinator import ServiceController
 from .frontend import async_register_frontend
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.BINARY_SENSOR]
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-
-
-class DockerConfigEntry(ConfigEntry):
-    runtime_data: ServiceController
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):

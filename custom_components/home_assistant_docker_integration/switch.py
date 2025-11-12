@@ -1,36 +1,26 @@
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import COORDINATOR, DOMAIN
-from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
+from ._api import DockerContainerInfo
+from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
+from .coordinator import DockerDataUpdateCoordinator
 from .entity import BaseDeviceEntity, create_containers_device_info
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: DockerConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up sensor platform."""
-
-    coordinator: DockerDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
-
-    @callback
-    def _add_container_entities() -> None:
-        """Add Entities."""
-        if coordinator.tracker.added_containers:
-            async_add_entities(
-                DockerContainerSwitch(coordinator, device_id)
-                for device_id in coordinator.tracker.added_containers
-            )
-
-    # listen for new containers
-    _add_container_entities()
-    entry.async_on_unload(coordinator.async_add_listener(_add_container_entities))
+    """Set up switch platform."""
+    auto_add_containers_devices(
+        entry,
+        async_add_entities,
+        lambda device_id, coordinator: DockerContainerSwitch(coordinator, device_id),
+    )
 
 
 class DockerContainerSwitch(BaseDeviceEntity[DockerContainerInfo], SwitchEntity):
@@ -46,7 +36,6 @@ class DockerContainerSwitch(BaseDeviceEntity[DockerContainerInfo], SwitchEntity)
         super().__init__(
             coordinator,
             device_id,
-            key="containers",
             name=dev.name,
         )
 
