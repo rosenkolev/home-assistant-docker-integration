@@ -106,6 +106,7 @@ sys.modules["homeassistant.config_entries"] = Mock()
 sys.modules["homeassistant.config_entries"].SOURCE_IMPORT = "SOURCE_IMPORT"
 sys.modules["homeassistant.helpers"] = Mock()
 sys.modules["homeassistant.helpers.config_validation"] = Mock()
+sys.modules["homeassistant.helpers.collection"] = Mock()
 sys.modules["homeassistant.helpers.device_registry"] = Mock()
 sys.modules["homeassistant.helpers.device_registry"].DeviceInfo = DeviceInfo
 sys.modules["homeassistant.helpers.entity_platform"] = Mock()

@@ -18,8 +18,9 @@ from homeassistant.components.lovelace.const import (
 )
 from homeassistant.components.lovelace.dashboard import LovelaceYAML
 from homeassistant.components.lovelace.resources import ResourceStorageCollection
-from homeassistant.const import CONF_FILENAME
+from homeassistant.const import CONF_FILENAME, CONF_ID
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.collection import ItemNotFound
 
 from .const import _LOGGER, DOMAIN
 
@@ -28,7 +29,8 @@ class FrontendResourcesRegistry:
     def __init__(self, hass: HomeAssistant, version: str):
         self.hass = hass
         self.version = version
-        self.registered_resources = set()
+        self.registered_js_urls = set()
+        self.registered_resource_ids = set()
         self.registered_panels = set()
 
     async def async_register_resource(self, url: str):
@@ -37,22 +39,23 @@ class FrontendResourcesRegistry:
 
         if isinstance(resources, ResourceStorageCollection):
             # when storage
-            item = await __async_find_lovelace_resource_by_url(resources, url)
+            item = await _async_find_lovelace_resource_by_url(resources, url)
             if item is None:
-                await resources.async_create_item(
+                item = await resources.async_create_item(
                     {"res_type": "module", "url": url_with_version}
                 )
             elif not item["url"].endswith(f"?v={self.version}"):
                 await resources.async_update_item(
-                    item["id"], {"res_type": "module", "url": url_with_version}
+                    item[CONF_ID], {"res_type": "module", "url": url_with_version}
                 )
+
+            self.registered_resource_ids.add(item.get(CONF_ID))
         else:
             _LOGGER.debug(f"Add extra JS module: {url_with_version}")
             add_extra_js_url(self.hass, url_with_version)
+            self.registered_js_urls.add(url_with_version)
 
-        self.registered_resources.add(url_with_version)
-
-    def async_register_yaml_panel(
+    def register_yaml_panel(
         self,
         url: str,
         config_file: str,
@@ -91,17 +94,22 @@ class FrontendResourcesRegistry:
 
     async def async_unload_frontend_resources(self):
         resources: ResourceStorageCollection = self.hass.data[LOVELACE_DATA].resources
-        is_resource_storage = isinstance(resources, ResourceStorageCollection)
         # remove all lovelace resources
-        for url in self.registered_resources:
-            if is_resource_storage:
-                await resources.async_delete_item(url)
-            else:
-                remove_extra_js_url(url)
+        for url in self.registered_js_urls:
+            remove_extra_js_url(url)
+        for id in self.registered_resource_ids:
+            try:
+                await resources.async_delete_item(id)
+            except ItemNotFound:
+                _LOGGER.warning(f"Resource with id {id} not found")
 
         # remove all panels
         for url in self.registered_panels:
-            await async_remove_panel(url)
+            async_remove_panel(self.hass, frontend_url_path=url)
+
+        self.registered_js_urls.clear()
+        self.registered_panels.clear()
+        self.registered_resource_ids.clear()
 
 
 async def async_register_static_path_to_hass_router(
@@ -115,7 +123,7 @@ async def async_register_static_path_to_hass_router(
     return url
 
 
-async def __async_find_lovelace_resource_by_url(resources, url: str):
+async def _async_find_lovelace_resource_by_url(resources, url: str):
     # force load storage
     await resources.async_get_info()
 

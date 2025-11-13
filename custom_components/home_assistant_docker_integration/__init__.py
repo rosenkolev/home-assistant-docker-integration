@@ -49,10 +49,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerConfigEntry) -> bo
 
     # init controller and fetch initial data
     controller = ServiceController(hass, entry)
-    await controller.async_initialize()
 
     # set controller to entity for easy access
     entry.runtime_data = controller
+
+    # connect the API and start the coordinators
+    await controller.async_initialize()
 
     # register (update) service information
     device_registry = dr.async_get(hass)
@@ -68,12 +70,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerConfigEntry) -> bo
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # register services
-    async_register_services()
+    async_register_services(hass)
 
     # register frontend panel
     resources: FrontendResourcesRegistry = hass.data[DOMAIN][DATA_KEY_RESOURCE_REGISTRY]
     await resources.async_register_resource(f"{FRONTEND_URL}/docker_dashboard.js")
-    await resources.async_register_yaml_panel(
+    resources.register_yaml_panel(
         url="dashboard-docker",
         config_file="docker_dashboard.yaml",
         title="Docker",

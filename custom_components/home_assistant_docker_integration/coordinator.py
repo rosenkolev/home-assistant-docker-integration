@@ -14,9 +14,11 @@ SCAN_INTERVAL = timedelta(seconds=5)
 
 DOCKER_DATA_KEYS = typing.Literal["containers", "images", "volumes"]
 
+type DockerConfigEntry = ConfigEntry[ServiceController]
+
 
 class ServiceController:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+    def __init__(self, hass: HomeAssistant, entry: DockerConfigEntry):
         self.api = DockerApi()
         self.data_coordinator = DockerDataUpdateCoordinator(hass, entry)
         self.update_coordinator = DockerContainerVersionUpdateCoordinator(hass, entry)
@@ -24,7 +26,7 @@ class ServiceController:
 
     @property
     def version(self) -> str:
-        return self._data_coordinator.data.version
+        return self.data_coordinator.data.version
 
     async def async_initialize(self):
         await self.api.async_connect()
@@ -43,16 +45,16 @@ class ServiceController:
 class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
     """Data update coordinator for integration"""
 
-    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: DockerConfigEntry) -> None:
         super().__init__(
             hass,
             _LOGGER,
-            config_entry=config_entry,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=SCAN_INTERVAL,
         )
 
-        self.tracker = DeviceTracker(config_entry.entry_id)
+        self.tracker = DeviceTracker(entry.entry_id)
         self.data: DockerHostInfo = {}
 
     @property
@@ -76,14 +78,15 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
 class DockerContainerVersionUpdateCoordinator(DataUpdateCoordinator):
     """Check for docker container/image update"""
 
-    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: DockerConfigEntry) -> None:
         super().__init__(
             hass,
             _LOGGER,
-            config_entry=config_entry,
+            config_entry=entry,
             name="docker_integration_container_versions",
             update_interval=timedelta(hours=6),
         )
+
         self.data: dict[str, DockerImageUpdateInfo] = {}
 
     @property
@@ -106,10 +109,6 @@ class DockerContainerVersionUpdateCoordinator(DataUpdateCoordinator):
             for key, c in data.containers.items()
             if c.image_name in images
         }
-
-
-class DockerConfigEntry(ConfigEntry):
-    runtime_data: ServiceController
 
 
 class DeviceTracker:

@@ -10,6 +10,15 @@ import {
   nothing,
 } from "https://unpkg.com/lit-element@4.2.1/lit-element.js?module";
 
+function _assert_element_config(config, config_keys) {
+  if (config_keys) {
+    if (!config) throw new Error("No configurations found");
+    for (const key of config_keys) {
+      if (!config[key]) throw new Error("No configuration " + key);
+    }
+  }
+}
+
 class BaseRowLitElement extends LitElement {
   static get properties() {
     return {
@@ -23,14 +32,7 @@ class BaseRowLitElement extends LitElement {
   /** @type {HassEntity} */ stateObj;
   /** @type {string[]} */ tracked_state_keys;
 
-  _assert_config(config, config_keys) {
-    if (config_keys) {
-      if (!config) throw new Error("No configurations found");
-      for (const key of config_keys) {
-        if (!config[key]) throw new Error("No configuration " + key);
-      }
-    }
-  }
+
 
   shouldUpdate(changedProps) {
     let hasChanged = false;
@@ -83,12 +85,60 @@ class BaseRowLitElement extends LitElement {
   `;
 }
 
+class DockerTitle extends BaseRowLitElement {
+  /** @type {{ heading: string, actions: { type: 'button', name: string, action: string } }} */
+  config;
+
+  setConfig(config) {
+    _assert_element_config(config, ['heading']);
+    this.config = config;
+  }
+
+  render_body() {
+    const handle_action = (action) => {
+      console.log("action:" + action)
+    }
+    return html`
+      <ha-card>
+        <div class="title">${this.config.heading}</div>
+        <div class="controls">
+          ${this.config.actions.map(it => html`
+             <ha-button size="small" @click=${() => handle_action(action)}>${it.name}</ha-button>
+            `)}
+        </div>
+      </ha-card>
+    `
+  }
+
+  static styles = [
+    css`
+      ha-card {
+        background: none;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .title {
+        color: var(--secondary-text-color);
+        font-size: var(--ha-font-size-m);
+        font-weight: var(--ha-font-weight-medium);
+      }
+
+    `
+  ]
+}
+
 class DockerContainerCard extends BaseRowLitElement {
   /** @type {{ container_id: string, name: string }} */
   config;
 
   setConfig(config) {
-    this._assert_config(config, ["container_id", "name"]);
+    _assert_element_config(config, ["container_id", "name"]);
     this._key_switch = `switch.docker_integration_containers_${config.container_id}`;
     this._key_sensor = `sensor.docker_integration_containers_${config.container_id}`;
     this.tracked_state_keys = [this._key_switch, this._key_sensor];
@@ -124,10 +174,10 @@ class DockerContainerCard extends BaseRowLitElement {
           <div class="col2">${sensor_state.attributes.status}</div>
           <ha-chip-set class="ports">
             ${sensor_state.attributes.ports.map(
-              (port) => html`
+      (port) => html`
                 <ha-assist-chip class="port" .label="${port}"></ha-assist-chip>
               `
-            )}
+    )}
           </ha-chip-set>
           <div class="flex"></div>
           <div class="control">
@@ -168,7 +218,7 @@ class DockerVolumeCard extends BaseRowLitElement {
   config;
 
   setConfig(config) {
-    this._assert_config(config, ["entity_id", "name"]);
+    _assert_element_config(config, ["entity_id", "name"]);
     this.tracked_state_keys = [config.entity_id];
     this.config = config;
   }
@@ -214,7 +264,7 @@ class DockerImageCard extends BaseRowLitElement {
   config;
 
   setConfig(config) {
-    this._assert_config(config, ["entity_id", "name"]);
+    _assert_element_config(config, ["entity_id", "name"]);
     this.tracked_state_keys = [config.entity_id];
     this.config = config;
   }
@@ -270,10 +320,10 @@ class StrategyViewDockerContainers {
     ]);
 
     const devs = devices
-      .filter((it) => it.model == "containers")
+      .filter((it) => it.model == "container")
       .map((it) => ({ name: it.name, id: it.identifiers[0][1] }));
-    const volumes = find_entities_by_model(devices, entities, "volumes");
-    const images = find_entities_by_model(devices, entities, "images");
+    const volumes = find_entities_by_model(devices, entities, "volume");
+    const images = find_entities_by_model(devices, entities, "image");
     return {
       sections: [
         {
@@ -281,8 +331,11 @@ class StrategyViewDockerContainers {
           column_span: 4,
           cards: [
             {
-              type: "heading",
+              type: "custom:docker-title-card",
               heading: "Containers",
+              actions: [
+                { name: 'Prune Containers', action: 'prune' }
+              ]
             },
             ...devs.map((it) => ({
               type: "custom:docker-container-card",
@@ -316,6 +369,7 @@ class StrategyViewDockerContainers {
 
 customElements.define("docker-container-card", DockerContainerCard);
 customElements.define("docker-volume-card", DockerVolumeCard);
+customElements.define("docker-title-card", DockerTitle);
 customElements.define("docker-image-card", DockerImageCard);
 customElements.define(
   "ll-strategy-view-docker-containers",
