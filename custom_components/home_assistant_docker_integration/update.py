@@ -4,9 +4,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ._api import DockerContainerInfo
-from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
-from .coordinator import DockerContainerVersionUpdateCoordinator
+from ._docker_api import DockerContainerInfo
+from .coordinator import (
+    DockerConfigEntry,
+    DockerContainerVersionUpdateCoordinator,
+    auto_add_containers_devices,
+)
 from .entity import create_containers_device_info, get_unique_id
 
 

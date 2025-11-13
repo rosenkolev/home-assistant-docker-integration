@@ -2,7 +2,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ._api import DockerContainerInfo
+from ._docker_api import DockerContainerInfo
 from .const import DOMAIN
 from .coordinator import DOCKER_DATA_KEYS, DockerDataUpdateCoordinator
 

@@ -1,12 +1,13 @@
 import typing
 from datetime import timedelta
 
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from . import DockerConfigEntry
-from ._api import DockerApi, DockerHostInfo, DockerImageUpdateInfo
+from ._docker_api import DockerApi, DockerHostInfo, DockerImageUpdateInfo
 from .const import _LOGGER, DOMAIN
 
 SCAN_INTERVAL = timedelta(seconds=5)
@@ -15,13 +16,13 @@ DOCKER_DATA_KEYS = typing.Literal["containers", "images", "volumes"]
 
 
 class ServiceController:
-    def __init__(self, hass: HomeAssistant, entry: DockerConfigEntry):
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.api = DockerApi()
         self.data_coordinator = DockerDataUpdateCoordinator(hass, entry)
         self.update_coordinator = DockerContainerVersionUpdateCoordinator(hass, entry)
         self.name = "Docker Host"
 
-    @property()
+    @property
     def version(self) -> str:
         return self._data_coordinator.data.version
 
@@ -42,7 +43,7 @@ class ServiceController:
 class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
     """Data update coordinator for integration"""
 
-    def __init__(self, hass: HomeAssistant, config_entry: DockerConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -75,7 +76,7 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
 class DockerContainerVersionUpdateCoordinator(DataUpdateCoordinator):
     """Check for docker container/image update"""
 
-    def __init__(self, hass: HomeAssistant, config_entry: DockerConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -105,6 +106,10 @@ class DockerContainerVersionUpdateCoordinator(DataUpdateCoordinator):
             for key, c in data.containers.items()
             if c.image_name in images
         }
+
+
+class DockerConfigEntry(ConfigEntry):
+    runtime_data: ServiceController
 
 
 class DeviceTracker:
@@ -165,3 +170,25 @@ class DeviceTracker:
                             device_entry.model,
                             entry_id,
                         )
+
+
+@callback
+def auto_add_containers_devices[TDevice](
+    entry: DockerConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+    create_fn: typing.Callable[[str, DockerDataUpdateCoordinator], TDevice],
+):
+    coordinator = entry.runtime_data.data_coordinator
+
+    @callback
+    def _add_container_entities() -> None:
+        """Add Entities."""
+        if coordinator.tracker.added_containers:
+            async_add_entities(
+                create_fn(device_id, coordinator)
+                for device_id in coordinator.tracker.added_containers
+            )
+
+    # listen for new containers
+    _add_container_entities()
+    entry.async_on_unload(coordinator.async_add_listener(_add_container_entities))

@@ -4,9 +4,12 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from ._api import DockerContainerInfo
-from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
-from .coordinator import DockerDataUpdateCoordinator
+from ._docker_api import DockerContainerInfo
+from .coordinator import (
+    DockerConfigEntry,
+    DockerDataUpdateCoordinator,
+    auto_add_containers_devices,
+)
 from .entity import BaseDeviceEntity, create_containers_device_info
 
 
@@ -41,6 +44,7 @@ class DockerContainerSwitch(BaseDeviceEntity[DockerContainerInfo], SwitchEntity)
 
         self._init_entity_id(SWITCH_DOMAIN)
         self._attr_device_info = create_containers_device_info(dev, coordinator)
+        self.id = dev.id
 
     @property
     def is_on(self) -> bool | None:
@@ -50,9 +54,9 @@ class DockerContainerSwitch(BaseDeviceEntity[DockerContainerInfo], SwitchEntity)
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the device on."""
         if not self.is_on:
-            await self.coordinator.api.async_container_start(self._id)
+            await self.coordinator.api.async_container_start(self.id)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the device off."""
         if self.is_on:
-            await self.coordinator.api.async_container_stop(self._id)
+            await self.coordinator.api.async_container_stop(self.id)

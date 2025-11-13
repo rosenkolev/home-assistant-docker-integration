@@ -1,7 +1,52 @@
 import sys
 from unittest.mock import Mock
 
-from tests.mocks import MockedBaseEntity
+
+class MockedBaseEntity:
+    ha_state_update_scheduled = False
+    ha_state_update_scheduled_force_refresh = False
+    ha_state_write = False
+    ha_added_to_hass = False
+    hass = 1
+
+    @property
+    def name(self) -> str:
+        return self._attr_name
+
+    @property
+    def unique_id(self) -> str:
+        return self._attr_unique_id
+
+    def async_write_ha_state(self):
+        self.ha_state_write = True
+
+    def async_schedule_update_ha_state(self, force_refresh=False):
+        self.ha_state_update_scheduled = True
+        self.ha_state_update_scheduled_force_refresh = force_refresh
+
+    def schedule_update_ha_state(self, force_refresh=False):
+        self.ha_state_update_scheduled = True
+        self.ha_state_update_scheduled_force_refresh = False
+
+    async def async_added_to_hass(self) -> None:
+        self.ha_added_to_hass = True
+
+    def async_on_remove(self, _=None):
+        pass
+
+    async def async_will_remove_from_hass(self) -> None:
+        pass
+
+
+class MockedCoordinator[TData]:
+    def __init__(self, hass, logger, config_entry, name, update_interval):
+        self.config_entry = config_entry
+        self.data: TData = None
+
+
+class MockedCoordinatorEntity[TCoordinator]:
+    def __init__(self, coordinator: TCoordinator):
+        self.coordinator = coordinator
 
 
 class Platform:
@@ -12,15 +57,27 @@ class Platform:
     FAN = "fan"
     SENSOR = "sensor"
     NUMBER = "number"
+    BUTTON = "button"
 
 
 class DeviceInfo:
-    def __init__(self, identifiers, name, manufacturer, model, sw_version):
+    def __init__(
+        self,
+        identifiers,
+        name,
+        model,
+        model_id=None,
+        manufacturer=None,
+        sw_version=None,
+        via_device=None,
+    ):
         self.identifiers = identifiers
         self.name = name
         self.manufacturer = manufacturer
         self.model = model
+        self.model_id = model_id
         self.sw_version = sw_version
+        self.via_device = via_device
 
 
 class MockVolSchema:
@@ -46,11 +103,19 @@ sys.modules["homeassistant.const"].CONF_PORT = "CONF_PORT"
 sys.modules["homeassistant.const"].CONF_UNIQUE_ID = "CONF_UNIQUE_ID"
 sys.modules["homeassistant.core"] = Mock()
 sys.modules["homeassistant.config_entries"] = Mock()
+sys.modules["homeassistant.config_entries"].SOURCE_IMPORT = "SOURCE_IMPORT"
 sys.modules["homeassistant.helpers"] = Mock()
 sys.modules["homeassistant.helpers.config_validation"] = Mock()
 sys.modules["homeassistant.helpers.device_registry"] = Mock()
 sys.modules["homeassistant.helpers.device_registry"].DeviceInfo = DeviceInfo
 sys.modules["homeassistant.helpers.entity_platform"] = Mock()
+sys.modules["homeassistant.helpers.update_coordinator"] = Mock()
+sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = (
+    MockedCoordinator
+)
+sys.modules["homeassistant.helpers.update_coordinator"].CoordinatorEntity = (
+    MockedCoordinatorEntity
+)
 sys.modules["homeassistant.helpers.event"] = Mock()
 sys.modules["homeassistant.helpers.selector"] = Mock()
 sys.modules["homeassistant.helpers.typing"] = Mock()
@@ -110,3 +175,26 @@ sys.modules["homeassistant.components.fan"].ATTR_PERCENTAGE = "A_PERCENTAGE"
 
 sys.modules["homeassistant.components.number"] = Mock()
 sys.modules["homeassistant.components.number"].NumberEntity = MockedBaseEntity
+
+
+class ButtonDeviceClass:
+    RESTART = 1
+
+
+sys.modules["homeassistant.components.button"] = Mock()
+sys.modules["homeassistant.components.button"].ButtonEntity = MockedBaseEntity
+sys.modules["homeassistant.components.button"].ButtonDeviceClass = ButtonDeviceClass
+
+sys.modules["homeassistant.components.frontend"] = Mock()
+sys.modules["homeassistant.components.frontend"].DATA_PANELS = "frontend_panels"
+
+sys.modules["homeassistant.components.http"] = Mock()
+sys.modules["homeassistant.components.lovelace.const"] = Mock()
+sys.modules["homeassistant.components.lovelace.dashboard"] = Mock()
+sys.modules["homeassistant.components.lovelace.resources"] = Mock()
+
+sys.modules["docker"] = Mock()
+sys.modules["docker.errors"] = Mock()
+sys.modules["docker.errors"].APIError = Exception
+sys.modules["docker.errors"].ImageNotFound = Exception
+sys.modules["docker.errors"].NotFound = Exception

@@ -9,10 +9,13 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from ._api import DockerContainerInfo
-from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
+from ._docker_api import DockerContainerInfo
 from .const import DOMAIN
-from .coordinator import DockerDataUpdateCoordinator
+from .coordinator import (
+    DockerConfigEntry,
+    DockerDataUpdateCoordinator,
+    auto_add_containers_devices,
+)
 from .entity import BaseDeviceEntity, create_containers_device_info, get_unique_id
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (

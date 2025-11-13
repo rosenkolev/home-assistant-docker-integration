@@ -1,34 +1,81 @@
-class MockedBaseEntity:
-    ha_state_update_scheduled = False
-    ha_state_update_scheduled_force_refresh = False
-    ha_state_write = False
-    ha_added_to_hass = False
-    hass = 1
+from dataclasses import dataclass
 
-    @property
-    def name(self) -> str:
-        return self._attr_name
+from custom_components.home_assistant_docker_integration._docker_api import (
+    DockerContainerInfo,
+    DockerHostInfo,
+    DockerImageInfo,
+    DockerVolumeInfo,
+)
 
-    @property
-    def unique_id(self) -> str:
-        return self._attr_unique_id
 
-    def async_write_ha_state(self):
-        self.ha_state_write = True
+@dataclass()
+class MockedConfigEntry:
+    entry_id: str
 
-    def async_schedule_update_ha_state(self, force_refresh=False):
-        self.ha_state_update_scheduled = True
-        self.ha_state_update_scheduled_force_refresh = force_refresh
 
-    def schedule_update_ha_state(self, force_refresh=False):
-        self.ha_state_update_scheduled = True
-        self.ha_state_update_scheduled_force_refresh = False
+class MockedDataUpdateCoordinator:
+    def __init__(self, entry_id: str):
+        self.config_entry = MockedConfigEntry(entry_id)
 
-    async def async_added_to_hass(self) -> None:
-        self.ha_added_to_hass = True
+    data = DockerHostInfo(
+        version="20",
+        containers_total=2,
+        containers_running=1,
+        images_total=3,
+        firewall="",
+        containers=dict(),
+        images=dict(),
+        volumes=dict(),
+    )
 
-    def async_on_remove(self, _=None):
-        pass
+    def add_container(self, item: DockerContainerInfo):
+        self.data.containers[item.short_id] = item
 
-    async def async_will_remove_from_hass(self) -> None:
-        pass
+    def add_image(self, item: DockerImageInfo):
+        self.data.images[item.id[:12]] = item
+
+    def add_volume(self, item: DockerVolumeInfo):
+        self.data.volumes[item.name[:26]] = item
+
+
+def create_mocked_container(
+    id="ab1cd2ef3gh4ij5kl6mn7",
+    short_id="ab1cd2ef3gh4",
+    name="Traefik",
+    state="running",
+    status="healthy",
+    image_id="qw11er22ty33ui44",
+    image_name="traefik/traefik:latest",
+    compose_project=None,
+    ports=[],
+    mounts=[],
+):
+    return DockerContainerInfo(
+        id=id,
+        name=name,
+        state=state,
+        status=status,
+        image_id=image_id,
+        image_name=image_name,
+        compose_project=compose_project,
+        short_id=short_id,
+        ports=ports,
+        mounts=mounts,
+    )
+
+
+MOCKED_CONTAINER = create_mocked_container()
+MOCKED_IMAGE = DockerImageInfo(
+    id="502bc8dd565a23955c8a372b250a2f659397b39b205d4820bd521776c300ea76",
+    title="Traefik",
+    tag="traefik/traefik:latest",
+    in_use=True,
+    description="A modern reverse-proxy",
+    rev="1",
+)
+MOCKED_VOLUME = DockerVolumeInfo(
+    name="fae919bd0d88c1809b8f3472e6335dfe13fe1749885db6559e50d0409142fd6c",
+    in_use=True,
+    size="15KB",
+    mount_point="/var/lib/docker/volumes/arcane_arcane-data/_data",
+)

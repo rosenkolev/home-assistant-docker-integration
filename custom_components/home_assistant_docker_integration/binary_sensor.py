@@ -3,9 +3,8 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from ._api import DockerImageInfo, DockerVolumeInfo
-from ._ha_helpers import DockerConfigEntry
-from .coordinator import DockerDataUpdateCoordinator
+from ._docker_api import DockerImageInfo, DockerVolumeInfo
+from .coordinator import DockerConfigEntry, DockerDataUpdateCoordinator
 from .entity import (
     BaseDeviceEntity,
     create_images_device_info,

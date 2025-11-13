@@ -5,9 +5,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from ._ha_helpers import DockerConfigEntry, auto_add_containers_devices
+from ._docker_api import DockerContainerInfo
 from .const import DOMAIN
-from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
+from .coordinator import (
+    DockerConfigEntry,
+    DockerDataUpdateCoordinator,
+    auto_add_containers_devices,
+)
 from .entity import (
     BaseDeviceEntity,
     create_containers_device_info,
@@ -34,11 +38,13 @@ async def async_setup_entry(
     )
 
     auto_add_containers_devices(
-        entry, async_add_entities, lambda id, _: ContainerRestartButton(coordinator, id)
+        entry,
+        async_add_entities,
+        lambda id, _: DockerContainerRestartButton(coordinator, id),
     )
 
 
-class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity):
+class DockerContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity):
     _attr_device_class = ButtonDeviceClass.RESTART
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -57,9 +63,10 @@ class ContainerRestartButton(BaseDeviceEntity[DockerContainerInfo], ButtonEntity
 
         self._init_entity_id(BUTTON_DOMAIN)
         self._attr_device_info = create_containers_device_info(dev, coordinator)
+        self.id = dev.id
 
     async def async_press(self) -> None:
-        await self.coordinator.api.async_container_restart(self._id)
+        await self.coordinator.api.async_container_restart(self.id)
 
 
 class DockerVolumePruneButton(ButtonEntity):
