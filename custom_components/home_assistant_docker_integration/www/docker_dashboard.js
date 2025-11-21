@@ -19,17 +19,36 @@ function _assert_element_config(config, config_keys) {
   }
 }
 
+function fireEvent(element, type, detail) {
+ const event = new Event(type, {
+    bubbles: true,
+    cancelable: false,
+    composed: true,
+  });
+  event.detail = detail;
+  element.dispatchEvent(event);
+}
+
+const dialogHeading = (title) => html`
+  <div class="header_title">
+    <ha-icon-button
+      .label="Close"
+      dialogAction="close"
+      class="header_button"
+    ><ha-icon .icon="mdi:close"><ha-icon></ha-icon-button>
+    <span>${title}</span>
+  </div>
+`;
+
 class BaseRowLitElement extends LitElement {
   static get properties() {
     return {
       hass: { attribute: false },
-      stateObj: { attribute: false },
       config: { state: true },
     };
   }
 
   /** @type {HomeAssistant} */ hass;
-  /** @type {HassEntity} */ stateObj;
   /** @type {string[]} */ tracked_state_keys;
 
   shouldUpdate(changedProps) {
@@ -84,7 +103,7 @@ class BaseRowLitElement extends LitElement {
 }
 
 class DockerTitle extends BaseRowLitElement {
-  /** @type {{ heading: string, actions: { type: 'button', icon?: string, name: string, action: { event: string, entity_id: string } } }} */
+  /** @type {{ heading: string, actions: { type: 'button', icon?: string, name: string, action: { dialog?: string, event?: string, entity_id?: string } } }} */
   config;
 
   setConfig(config) {
@@ -94,16 +113,23 @@ class DockerTitle extends BaseRowLitElement {
 
   render_body() {
     const handle_action = (action) => {
-      this.hass.callService("homeassistant", action.event, {
-        entity_id: action.entity_id,
-      });
-    }
+      if (action.dialog) {
+        fireEvent(this, "show-dialog", {
+          dialogTag: action.dialog,
+          dialogImport: () => Promise.resolve(),
+          dialogParams: {},
+        });
+      } else if (action.event) {
+        const domain = action.entity_id.substring(0, action.entity_id.indexOf('.'));
+        this.hass.callService(domain, action.event, { entity_id: action.entity_id });
+      } else { throw new Error('No action') }
+    };
     return html`
       <ha-card>
         <div class="title">${this.config.heading}</div>
         <div class="controls">
           ${this.config.actions.map(it => html`
-             <ha-button size="small" @click=${() => handle_action(action)}>${it.icon ? html`<ha-icon .icon=${it.icon}></ha-icon>&nbsp;` : ''}${it.name}</ha-button>
+             <ha-button size="small" @click=${() => handle_action(it.action)}>${it.icon ? html`<ha-icon .icon=${it.icon}></ha-icon>&nbsp;` : ''}${it.name}</ha-button>
             `)}
         </div>
       </ha-card>
@@ -122,6 +148,7 @@ class DockerTitle extends BaseRowLitElement {
         display: flex;
         justify-content: space-between;
         align-items: center;
+        margin-top: 15px;
       }
       .title {
         margin-left: 10px;
@@ -147,6 +174,7 @@ class DockerContainerCard extends BaseRowLitElement {
   }
 
   render_body() {
+    /** @type {HassEntity} */
     const sensor_state = this.hass.states[this._key_sensor];
     const switch_state = this.hass.states[this._key_switch];
     const id = this.config.container_id
@@ -156,7 +184,7 @@ class DockerContainerCard extends BaseRowLitElement {
         entity_id: this._key_switch,
       });
     const restart = () =>
-      this.hass.callService("homeassistant", "press", {
+      this.hass.callService("button", "press", {
         entity_id: `button.docker_integration_containers_${id}_restart`,
       });
     return html`
@@ -303,6 +331,62 @@ class DockerImageCard extends BaseRowLitElement {
   ];
 }
 
+class DockerAddDialog extends LitElement {
+  static get properties() {
+    return {
+      hass: { attribute: false },
+      data: { state: true },
+    };
+  }
+
+  async showDialog(dialogParams) {
+    this._dialogParams = dialogParams;
+    await this.updateComplete;
+  }
+
+  closeDialog() {
+    this._dialogParams = undefined;
+    fireEvent(this, "dialog-closed", { dialog: this.localName });
+  }
+
+  render() {
+    if (!this._dialogParams) {
+      return nothing;
+    }
+    const add = () => {
+      console.log('Add container');
+    };
+
+    return html`
+      <ha-dialog
+        open
+        scrimClickAction
+        escapeKeyAction
+        .heading=${dialogHeading("Create container")}
+        @closed=${this.closeDialog}
+      >
+        <div>
+          <h1>A test dialog</h1>
+        </div>
+        <mwc-button slot="secondaryAction" @click=${this.closeDialog} dialogInitialFocus>
+          Cancel
+        </mwc-button>
+        <mwc-button
+          .disabled=${false}
+          slot="primaryAction"
+          @click=${add()}
+        >
+          Add
+        </mwc-button>
+      </ha-dialog>
+    `;
+  }
+
+  static styles = [
+    css``
+  ];
+}
+
 function find_entities_by_model(devices, entities, model) {
   const device_id = devices.find((it) => it.model == model).id;
   return entities
@@ -334,6 +418,12 @@ class StrategyViewDockerContainers {
               actions: [
                 {
                   type: 'button',
+                  name: 'Create',
+                  icon: 'mdi:plus',
+                  action: { dialog: 'docker-create-container-dialog' }
+                },
+                {
+                  type: 'button',
                   name: 'Prune Containers',
                   icon: 'mdi:delete-outline',
                   action: { event: 'press', entity_id: 'button.docker_host_prune_containers' }
@@ -346,7 +436,7 @@ class StrategyViewDockerContainers {
               name: it.name,
             })),
             {
-              type: "heading",
+              type: "custom:docker-title-card",
               heading: "Images",
               actions: [
                 {
@@ -362,7 +452,7 @@ class StrategyViewDockerContainers {
               name: it.name,
             })),
             {
-              type: "heading",
+              type: "custom:docker-title-card",
               heading: "Volumes",
               actions: [
                 {
@@ -388,6 +478,7 @@ customElements.define("docker-container-card", DockerContainerCard);
 customElements.define("docker-volume-card", DockerVolumeCard);
 customElements.define("docker-title-card", DockerTitle);
 customElements.define("docker-image-card", DockerImageCard);
+customElements.define("docker-create-container-dialog", DockerAddDialog);
 customElements.define(
   "ll-strategy-view-docker-containers",
   StrategyViewDockerContainers

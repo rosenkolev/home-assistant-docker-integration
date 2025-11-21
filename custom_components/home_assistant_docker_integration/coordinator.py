@@ -31,6 +31,7 @@ class ServiceController:
     async def async_initialize(self):
         await self.api.async_connect()
         await self.data_coordinator.async_config_entry_first_refresh()
+        await self.update_coordinator.async_config_entry_first_refresh()
 
     async def async_shutdown(self):
         await self.data_coordinator.async_shutdown()
@@ -95,20 +96,18 @@ class DockerContainerVersionUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, DockerImageUpdateInfo]:
         """Fetch data."""
-        api: DockerApi = self.config_entry.config_entry.api
+        api = self.api
         data: DockerHostInfo = self.config_entry.runtime_data.data_coordinator.data
+        images = dict[str, DockerImageUpdateInfo]()
         image_names = set(
             [c.image_name for c in data.containers.values() if c.state == "running"]
         )
-        images = dict(
-            (image, await api.async_images_check_update(image)) for image in image_names
-        )
+        for image in image_names:
+            version = await api.async_images_check_update(image)
+            if version:
+                images[image] = version
 
-        return {
-            key: images.get(c.image_name)
-            for key, c in data.containers.items()
-            if c.image_name in images
-        }
+        return images
 
 
 class DeviceTracker:

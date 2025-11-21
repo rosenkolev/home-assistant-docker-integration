@@ -323,7 +323,7 @@ class DockerApi:
         """
 
         def check_for_image_update(client, image_name: str) -> bool:
-            info = DockerImageUpdateInfo(False, None, None)
+            info = DockerImageUpdateInfo(False, None, None, None)
             try:
                 local_image = client.images.get(image_name)
                 local_digest = local_image.attrs.get("RepoDigests", [None])[0]
@@ -331,24 +331,37 @@ class DockerApi:
                     info.has_newer = True
                     return info
 
-                local_digest_hash = local_digest.split("@", 1)
-                local_labels = local_image.attrs.get("Labels", {})
-                info.source = local_labels("org.opencontainers.image.source", None)
+                local_digest_hash = local_digest.split("@")[1]
+                local_labels = local_image.attrs.get("Config", {}).get("Labels") or {}
+                info.source = local_labels.get("org.opencontainers.image.source")
                 info.current_ver = (
                     local_labels.get("org.opencontainers.image.version")
-                    or local_digest_hash.split(":", 1)[:12]
+                    or local_digest_hash.split(":", 2)[1][:12]
                 )
 
                 registry_data = client.images.get_registry_data(image_name)
                 remote_digest_hash = registry_data.id
-                _LOGGER.warning(registry_data)
-                info.new_ver = (
-                    registry_data.attrs.get("Labels", {}).get(
-                        "org.opencontainers.image.version"
-                    )
-                    or remote_digest_hash.split(":", 1)[:12]
-                )
+                remote_labels = {}
                 info.has_newer = local_digest_hash != remote_digest_hash
+                if info.has_newer:
+                    id = remote_digest_hash.split(":", 2)[1]
+                    _LOGGER.warning("has newer: " + id)
+                    remote_data = client.api.inspect_image(remote_digest_hash)
+                    _LOGGER.warning(remote_data)
+                    remote_labels = remote_data.get("Labels") or {}
+
+                info.new_ver = (
+                    remote_labels.get("org.opencontainers.image.version")
+                    or remote_digest_hash.split(":", 2)[1][:12]
+                )
+                # remote_version = registry_data.attrs.get("Labels", {}).get(
+                #     "org.opencontainers.image.version"
+                # )
+                # _LOGGER.warning(local_image.attrs)
+                # _LOGGER.warning(registry_data.attrs)
+                _LOGGER.warning(
+                    f"image-versions l_hash:{local_digest_hash} l_ver:{info.current_ver}, r_hash:{remote_digest_hash}, r_ver:{info.new_ver}"
+                )
             except ImageNotFound:
                 # image not found locally so update/pull it
                 info.has_newer = True
