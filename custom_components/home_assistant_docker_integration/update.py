@@ -1,5 +1,9 @@
 from homeassistant.components.update import DOMAIN as UPDATE_DOMAIN
-from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
+from homeassistant.components.update import (
+    UpdateDeviceClass,
+    UpdateEntity,
+    UpdateEntityFeature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -35,6 +39,9 @@ class DockerContainerUpdate(
     CoordinatorEntity[DockerContainerVersionUpdateCoordinator], UpdateEntity
 ):
     _attr_supported_features = UpdateEntityFeature.INSTALL
+    _attr_device_class = UpdateDeviceClass.FIRMWARE
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:docker"
 
     def __init__(
         self,
@@ -45,7 +52,7 @@ class DockerContainerUpdate(
         super().__init__(coordinator)
 
         self._attr_name = device.name + " update"
-        self._attr_has_entity_name = True
+        self._attr_title = "New container " + device.name
         self._attr_unique_id = get_unique_id(device.short_id, "containers", "update")
         self._attr_device_info = create_containers_device_info(device, coordinator)
 
@@ -53,6 +60,7 @@ class DockerContainerUpdate(
         self._key = device.short_id
 
         self.coordinator = coordinator
+        self.entity_id = f"{UPDATE_DOMAIN}.{self._attr_unique_id}"
 
     @property
     def available(self) -> bool:

@@ -32,8 +32,6 @@ class BaseRowLitElement extends LitElement {
   /** @type {HassEntity} */ stateObj;
   /** @type {string[]} */ tracked_state_keys;
 
-
-
   shouldUpdate(changedProps) {
     let hasChanged = false;
     if (this.config && this.hass) {
@@ -80,7 +78,7 @@ class BaseRowLitElement extends LitElement {
       flex: 1;
     }
     .inactive {
-      background-color: #fef0f0;
+      background-color: var(--secondary-background-color);
     }
   `;
 }
@@ -124,6 +122,7 @@ class DockerTitle extends BaseRowLitElement {
         align-items: center;
       }
       .title {
+        margin-left: 10px;
         color: var(--secondary-text-color);
         font-size: var(--ha-font-size-m);
         font-weight: var(--ha-font-weight-medium);
@@ -148,18 +147,16 @@ class DockerContainerCard extends BaseRowLitElement {
   render_body() {
     const sensor_state = this.hass.states[this._key_sensor];
     const switch_state = this.hass.states[this._key_switch];
+    const id = this.config.container_id
     const isOn = switch_state.state === "on";
     const toggle = () =>
       this.hass.callService("homeassistant", "toggle", {
         entity_id: this._key_switch,
       });
     const restart = () =>
-      this.hass.callService("homeassistant", "toggle", {
-        entity_id: this._key_switch,
+      this.hass.callService("homeassistant", "press", {
+        entity_id: `button.docker_integration_containers_${id}_restart`,
       });
-    const _handleAction = (test, n) => {
-      console.log(test, n);
-    };
     return html`
       <ha-card>
         <div class="card-content">
@@ -173,11 +170,9 @@ class DockerContainerCard extends BaseRowLitElement {
           ></ha-assist-chip>
           <div class="col2">${sensor_state.attributes.status}</div>
           <ha-chip-set class="ports">
-            ${sensor_state.attributes.ports.map(
-      (port) => html`
+            ${sensor_state.attributes.ports.map((port) => html`
                 <ha-assist-chip class="port" .label="${port}"></ha-assist-chip>
-              `
-    )}
+              `)}
           </ha-chip-set>
           <div class="flex"></div>
           <div class="control">
@@ -300,6 +295,7 @@ class DockerImageCard extends BaseRowLitElement {
       }
       .col2 {
         width: 40%;
+        max-height: 60px;
       }
     `,
   ];
@@ -375,15 +371,3 @@ customElements.define(
   "ll-strategy-view-docker-containers",
   StrategyViewDockerContainers
 );
-
-/* <ha-button-menu
-                @action=${_handleAction}
-                @closed=${(ev) => ev.stopPropagation()}
-              >
-              <ha-icon-button slot="trigger" .label="action">
-                <ha-icon .icon="mdi:dots-vertical"></ha-icon>
-              </ha-icon-button>
-              <ha-list-item graphic="icon">Restart</ha-list-item>
-              <ha-list-item graphic="icon">Remove</ha-list-item>
-            </ha-button-menu>
-            */
