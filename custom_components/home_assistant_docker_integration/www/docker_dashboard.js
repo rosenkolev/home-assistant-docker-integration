@@ -84,7 +84,7 @@ class BaseRowLitElement extends LitElement {
 }
 
 class DockerTitle extends BaseRowLitElement {
-  /** @type {{ heading: string, actions: { type: 'button', name: string, action: string } }} */
+  /** @type {{ heading: string, actions: { type: 'button', icon?: string, name: string, action: { event: string, entity_id: string } } }} */
   config;
 
   setConfig(config) {
@@ -94,14 +94,16 @@ class DockerTitle extends BaseRowLitElement {
 
   render_body() {
     const handle_action = (action) => {
-      console.log("action:" + action)
+      this.hass.callService("homeassistant", action.event, {
+        entity_id: action.entity_id,
+      });
     }
     return html`
       <ha-card>
         <div class="title">${this.config.heading}</div>
         <div class="controls">
           ${this.config.actions.map(it => html`
-             <ha-button size="small" @click=${() => handle_action(action)}>${it.name}</ha-button>
+             <ha-button size="small" @click=${() => handle_action(action)}>${it.icon ? html`<ha-icon .icon=${it.icon}></ha-icon>&nbsp;` : ''}${it.name}</ha-button>
             `)}
         </div>
       </ha-card>
@@ -330,7 +332,12 @@ class StrategyViewDockerContainers {
               type: "custom:docker-title-card",
               heading: "Containers",
               actions: [
-                { name: 'Prune Containers', action: 'prune' }
+                {
+                  type: 'button',
+                  name: 'Prune Containers',
+                  icon: 'mdi:delete-outline',
+                  action: { event: 'press', entity_id: 'button.docker_host_prune_containers' }
+                }
               ]
             },
             ...devs.map((it) => ({
@@ -341,6 +348,13 @@ class StrategyViewDockerContainers {
             {
               type: "heading",
               heading: "Images",
+              actions: [
+                {
+                  type: 'button',
+                  name: 'Prune Images',
+                  action: { event: 'press', entity_id: 'button.local_docker_images_prune_images' }
+                }
+              ]
             },
             ...images.map((it) => ({
               type: "custom:docker-image-card",
@@ -350,6 +364,13 @@ class StrategyViewDockerContainers {
             {
               type: "heading",
               heading: "Volumes",
+              actions: [
+                {
+                  type: 'button',
+                  name: 'Prune Volumes',
+                  action: { event: 'press', entity_id: 'button.local_docker_volumes_prune_volumes' }
+                }
+              ]
             },
             ...volumes.map((it) => ({
               type: "custom:docker-volume-card",

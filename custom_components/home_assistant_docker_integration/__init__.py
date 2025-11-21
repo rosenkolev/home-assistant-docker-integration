@@ -16,7 +16,13 @@ from .frontend import (
 )
 from .services import async_register_services, async_remove_services
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.BINARY_SENSOR]
+PLATFORMS = [
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.BUTTON,
+    Platform.BINARY_SENSOR,
+    Platform.UPDATE,
+]
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
