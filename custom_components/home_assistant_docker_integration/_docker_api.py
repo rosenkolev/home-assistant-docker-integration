@@ -346,7 +346,7 @@ class DockerApi:
                 if info.has_newer:
                     id = remote_digest_hash.split(":", 2)[1]
                     _LOGGER.warning("has newer: " + id)
-                    remote_data = client.api.inspect_image(remote_digest_hash)
+                    remote_data = client.api.inspect_image(image_name)
                     _LOGGER.warning(remote_data)
                     remote_labels = remote_data.get("Labels") or {}
 
