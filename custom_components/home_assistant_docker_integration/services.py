@@ -16,8 +16,9 @@ CONF_NAME = "name"
 CONF_NETWORK = "network"
 CONF_PORTS = "ports"
 CONF_VOLUMES = "volumes"
+CONF_RESTART_POLICY = "restart_policy"
 
-CREATE_CONTAINER_SERVICE = "create_container"
+CREATE_CONTAINER_SERVICE = "create"
 CREATE_CONTAINER_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_IMAGE): cv.string,
@@ -25,6 +26,7 @@ CREATE_CONTAINER_SERVICE_SCHEMA = vol.Schema(
         vol.Optional(CONF_NETWORK): cv.string,
         vol.Optional(CONF_PORTS): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_VOLUMES): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_RESTART_POLICY): cv.string,
     }
 )
 
@@ -39,12 +41,17 @@ async def _async_handle_create(call: ServiceCall) -> ServiceResponse:
         _LOGGER.error("Service can't be called because no active config_entries")
         return
 
+    restart_policy = call.data.get(CONF_RESTART_POLICY)
+    if restart_policy:
+        restart_policy = {"Name": restart_policy}
+
     entires[0].runtime_data.api.async_container_create(
         image=call.data.get(CONF_IMAGE),
         name=call.data.get(CONF_NAME),
         network=call.data.get(CONF_NETWORK),
         ports=call.data.get(CONF_PORTS),
         volumes=call.data.get(CONF_VOLUMES),
+        restart_policy=restart_policy,
     )
 
 

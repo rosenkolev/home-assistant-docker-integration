@@ -20,3 +20,12 @@ create:
       required: false
       selector:
         object:
+    restart_policy:
+      required: false
+      selector:
+        select:
+          options:
+            - "no"
+            - "always"
+            - "on-failure"
+            - "unless-stopped"
