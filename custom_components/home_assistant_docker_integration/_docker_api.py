@@ -208,16 +208,18 @@ class DockerApi:
         ports: dict = None,
         network: str = None,
         volumes: list = None,
+        restart_policy: dict = None,
     ):
         return self.loop.run_in_executor(
             None,
-            lambda client, image, name, ports, network, volumes: client.containers.create(
+            lambda client, image, name, ports, network, volumes, restart_policy: client.containers.create(
                 image,
                 detach=True,
                 name=name,
                 ports=ports,
                 network=network,
                 volumes=volumes,
+                restart_policy=restart_policy,
             ),
             self.client,
             image,
@@ -225,6 +227,7 @@ class DockerApi:
             ports,
             network,
             volumes,
+            restart_policy,
         )
 
     def async_volumes_prune(self):

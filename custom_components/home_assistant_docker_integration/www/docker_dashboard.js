@@ -20,7 +20,7 @@ function _assert_element_config(config, config_keys) {
 }
 
 function fireEvent(element, type, detail) {
- const event = new Event(type, {
+  const event = new Event(type, {
     bubbles: true,
     cancelable: false,
     composed: true,
@@ -354,7 +354,27 @@ class DockerAddDialog extends LitElement {
       return nothing;
     }
     const add = () => {
-      console.log('Add container');
+      const image = this.shadowRoot.querySelector("#image").value;
+      const name = this.shadowRoot.querySelector("#name").value;
+      const network = this.shadowRoot.querySelector("#network").value;
+      const portsStr = this.shadowRoot.querySelector("#ports").value;
+      const volumesStr = this.shadowRoot.querySelector("#volumes").value;
+      const restart = this.shadowRoot.querySelector("#restart").value;
+
+      const ports = portsStr ? portsStr.split(",").map(p => p.trim()).filter(p => p) : undefined;
+      const volumes = volumesStr ? volumesStr.split(",").map(v => v.trim()).filter(v => v) : undefined;
+
+      const payload = {
+        image,
+        name,
+        network: network || undefined,
+        ports: ports,
+        volumes: volumes,
+        restart_policy: restart || undefined
+      };
+
+      this.hass.callService("docker_integration", "create", payload);
+      this.closeDialog();
     };
 
     return html`
@@ -365,16 +385,25 @@ class DockerAddDialog extends LitElement {
         .heading=${dialogHeading("Create container")}
         @closed=${this.closeDialog}
       >
-        <div>
-          <h1>A test dialog</h1>
+        <div class="content">
+          <ha-textfield id="image" label="Image" dialogInitialFocus></ha-textfield>
+          <ha-textfield id="name" label="Name"></ha-textfield>
+          <ha-textfield id="network" label="Network"></ha-textfield>
+          <ha-textfield id="ports" label="Ports (80:80, 443:443)"></ha-textfield>
+          <ha-textfield id="volumes" label="Volumes (/host:/container)"></ha-textfield>
+          <ha-select id="restart" label="Restart Policy">
+            <mwc-list-item value="no">No</mwc-list-item>
+            <mwc-list-item value="always">Always</mwc-list-item>
+            <mwc-list-item value="on-failure">On Failure</mwc-list-item>
+            <mwc-list-item value="unless-stopped">Unless Stopped</mwc-list-item>
+          </ha-select>
         </div>
-        <mwc-button slot="secondaryAction" @click=${this.closeDialog} dialogInitialFocus>
+        <mwc-button slot="secondaryAction" @click=${this.closeDialog}>
           Cancel
         </mwc-button>
         <mwc-button
-          .disabled=${false}
           slot="primaryAction"
-          @click=${add()}
+          @click=${add}
         >
           Add
         </mwc-button>
@@ -383,7 +412,16 @@ class DockerAddDialog extends LitElement {
   }
 
   static styles = [
-    css``
+    css`
+      .content {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      ha-textfield, ha-select {
+        width: 100%;
+      }
+    `
   ];
 }
 
