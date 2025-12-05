@@ -1,9 +1,11 @@
 import asyncio
+import re
 import typing
 from dataclasses import dataclass
 
+import aiohttp
 import docker
-from docker.errors import APIError, ImageNotFound, NotFound
+from docker.errors import ImageNotFound, NotFound
 
 from .const import _LOGGER
 
@@ -68,11 +70,139 @@ def get_label(key: str, labels: list[str] | None):
     return labels[key] if labels is not None and key in labels else None
 
 
+def get_version_from_labels(hash: str, labels: list[str] | None):
+    return (
+        labels["org.opencontainers.image.version"]
+        if labels is not None and "org.opencontainers.image.version" in labels
+        else hash.split(":", 2)[1][:12]
+    )
+
+
+def parse_image_name(image_name: str) -> tuple[str, str, str]:
+    """Parse image name into registry, repository, and tag."""
+    parts = image_name.split("/")
+    if len(parts) == 1 or (
+        "." not in parts[0] and ":" not in parts[0] and parts[0] != "localhost"
+    ):
+        # Official library or default registry
+        registry = "registry-1.docker.io"
+        repository = "/".join(parts)
+        if len(parts) == 1:
+            repository = f"library/{repository}"
+    else:
+        registry = parts[0]
+        repository = "/".join(parts[1:])
+
+    if registry == "docker.io":
+        registry = "registry-1.docker.io"
+
+    tag = "latest"
+    if ":" in repository:
+        repository, tag = repository.split(":", 1)
+
+    return registry, repository, tag
+
+
+class DockerHttpApi:
+    def __init__(self):
+        self.session: aiohttp.ClientSession | None = None
+
+    async def async_connect(self):
+        self.session = aiohttp.ClientSession()
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    async def get_registry_image_info(self, image_name: str) -> tuple[str | None, dict]:
+        """Fetch remote digest and labels from registry directly."""
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+
+        try:
+            registry, repository, tag = parse_image_name(image_name)
+            # 1. Get Auth Token
+            auth_url = f"https://{registry}/v2/"
+            async with self.session.get(auth_url) as resp:
+                if resp.status == 401:
+                    auth_header = resp.headers.get("Www-Authenticate")
+                    if auth_header:
+                        match = re.match(
+                            r'Bearer realm="([^"]+)",service="([^"]+)"', auth_header
+                        )
+                        if match:
+                            realm = match.group(1)
+                            service = match.group(2)
+                            scope = f"repository:{repository}:pull"
+                            token_url = f"{realm}?service={service}&scope={scope}"
+                            async with self.session.get(token_url) as token_resp:
+                                if token_resp.status == 200:
+                                    token_data = await token_resp.json()
+                                    token = token_data.get("token") or token_data.get(
+                                        "access_token"
+                                    )
+                                    headers = {"Authorization": f"Bearer {token}"}
+                                else:
+                                    _LOGGER.warning(
+                                        f"Failed to get auth token for {image_name}: {token_resp.status}"
+                                    )
+                                    return None, {}
+                        else:
+                            # Try parsing without regex if it's simpler or different fmt
+                            pass
+
+            api_base = f"https://{registry}/v2/{repository}"
+            headers = headers if "headers" in locals() else {}
+            # Accept both V2 and OCI manifests
+            headers["Accept"] = (
+                "application/vnd.docker.distribution.manifest.v2+json, "
+                "application/vnd.oci.image.manifest.v1+json, "
+                "application/vnd.docker.distribution.manifest.list.v2+json, "
+                "application/vnd.oci.image.index.v1+json"
+            )
+
+            # 2. Get Manifest
+            _LOGGER.debug(f"Fetching manifest from {api_base}/manifests/{tag}")
+            remote_labels = {}
+            async with self.session.get(
+                f"{api_base}/manifests/{tag}", headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        f"Failed to get manifest for {image_name}: {resp.status}"
+                    )
+                    return None, {}
+
+                # Check Digest Header
+                remote_digest = resp.headers.get("Docker-Content-Digest")
+                if not remote_digest:
+                    # Calculate or read from body? usually header is best for v2
+                    pass
+
+                manifest = await resp.json()
+                manifests = manifest.get("manifests", [])
+                annotations = manifest.get("annotations", {})
+                for manifest in manifests:
+                    # combine manifest.annotations as labels
+                    remote_labels.update(manifest.get("annotations", {}))
+
+                # combine annotations as labels
+                remote_labels.update(annotations)
+
+            return remote_digest, remote_labels
+
+        except Exception as e:
+            _LOGGER.warning(f"Error checking registry for {image_name}: {e}")
+            return None, {}
+
+
 class DockerApi:
     def __init__(self):
         self.base_url = "unix://var/run/docker.sock"
         self.loop = asyncio.get_running_loop()
         self.client = None
+        self.http = DockerHttpApi()
 
     @property
     def connected(self) -> bool:
@@ -83,6 +213,7 @@ class DockerApi:
             obj.client = docker.DockerClient(base_url=obj.base_url)
 
         await self.loop.run_in_executor(None, docker_client_init, self)
+        await self.http.async_connect()
 
     def async_fetch_data(self):
         def docker_data(client):
@@ -320,64 +451,92 @@ class DockerApi:
 
         return self.loop.run_in_executor(None, _update_container, self.client, id)
 
-    def async_images_check_update(self, image_name: str) -> DockerImageUpdateInfo:
+    async def async_images_check_update(self, image_name: str) -> DockerImageUpdateInfo:
         """
         Check if a newer version of the image exists on the registry.
         """
+        _LOGGER.debug(f"async_images_check_update: {image_name}")
 
-        def check_for_image_update(client, image_name: str) -> bool:
-            info = DockerImageUpdateInfo(False, None, None, None)
+        def get_local_info(client, image_name: str) -> tuple[str | None, dict | None]:
             try:
                 local_image = client.images.get(image_name)
                 local_digest = local_image.attrs.get("RepoDigests", [None])[0]
+
                 if not local_digest:
-                    info.has_newer = True
-                    return info
+                    return None, None
 
                 local_digest_hash = local_digest.split("@")[1]
                 local_labels = local_image.attrs.get("Config", {}).get("Labels") or {}
-                info.source = local_labels.get("org.opencontainers.image.source")
-                info.current_ver = (
-                    local_labels.get("org.opencontainers.image.version")
-                    or local_digest_hash.split(":", 2)[1][:12]
-                )
-
-                registry_data = client.images.get_registry_data(image_name)
-                remote_digest_hash = registry_data.id
-                remote_labels = {}
-                info.has_newer = local_digest_hash != remote_digest_hash
-                if info.has_newer:
-                    id = remote_digest_hash.split(":", 2)[1]
-                    _LOGGER.warning("has newer: " + id)
-                    remote_data = client.api.inspect_image(image_name)
-                    _LOGGER.warning(remote_data)
-                    remote_labels = remote_data.get("Labels") or {}
-
-                info.new_ver = (
-                    remote_labels.get("org.opencontainers.image.version")
-                    or remote_digest_hash.split(":", 2)[1][:12]
-                )
-                # remote_version = registry_data.attrs.get("Labels", {}).get(
-                #     "org.opencontainers.image.version"
-                # )
-                # _LOGGER.warning(local_image.attrs)
-                # _LOGGER.warning(registry_data.attrs)
-                _LOGGER.warning(
-                    f"image-versions l_hash:{local_digest_hash} l_ver:{info.current_ver}, r_hash:{remote_digest_hash}, r_ver:{info.new_ver}"
-                )
+                return local_digest_hash, local_labels
             except ImageNotFound:
-                # image not found locally so update/pull it
-                info.has_newer = True
-            except APIError as e:
-                _LOGGER.warning(f"Could not fetch registry data for {image_name}: {e}")
+                return None, None
+            except Exception as e:
+                _LOGGER.warning(f"Error getting local image info for {image_name}: {e}")
+                raise e
 
-            return info
+        # Fallback: Use blocking docker-py check which handles auth better sometimes?
+        def fallback_get_registry_image_info(client, image_name):
+            try:
+                registry_data = client.images.get_registry_data(image_name)
+                return registry_data.id, {}  # No labels on registry_data
+            except Exception:
+                return None, {}
 
-        return self.loop.run_in_executor(
-            None, check_for_image_update, self.client, image_name
+        info = DockerImageUpdateInfo(
+            has_newer=False, current_ver=None, new_ver=None, source=None
         )
 
-    def disconnect(self):
+        # 1. Get Local Info
+        try:
+            local_digest_hash, local_labels = await self.loop.run_in_executor(
+                None, get_local_info, self.client, image_name
+            )
+        except Exception:
+            # If error happens, assume we can't check
+            return info
+
+        if not local_digest_hash:
+            # Not found or no digest, assume update available (standard behavior)
+            info.has_newer = True
+            return info
+
+        info.source = local_labels.get("org.opencontainers.image.source")
+        info.current_ver = get_version_from_labels(local_digest_hash, local_labels)
+
+        # 2. Check Registry
+        # Fallback to docker-py logic if my custom logic fails?
+        # Actually logic is robust enough to return None.
+        _LOGGER.debug(f"Checking registry for {image_name}...")
+        remote_digest_hash, remote_labels = await self.http.get_registry_image_info(
+            image_name
+        )
+        _LOGGER.debug(f"Remote digest (http): {remote_digest_hash}:::{remote_labels}")
+
+        if not remote_digest_hash:
+            _LOGGER.debug("Falling back to docker client for registry info")
+            remote_digest_hash, remote_labels = await self.loop.run_in_executor(
+                None, fallback_get_registry_image_info, self.client, image_name
+            )
+            _LOGGER.debug(f"Remote digest (fallback): {remote_digest_hash}")
+
+        if remote_digest_hash:
+            info.has_newer = local_digest_hash != remote_digest_hash
+            _LOGGER.debug(
+                f"Has newer: {info.has_newer} (Local: {local_digest_hash} vs Remote: {remote_digest_hash})"
+            )
+            if info.has_newer:
+                info.new_ver = get_version_from_labels(
+                    remote_digest_hash, remote_labels
+                )
+                _LOGGER.debug(
+                    f"Update found for {image_name}: {info.current_ver} -> {info.new_ver}"
+                )
+
+        return info
+
+    async def disconnect(self):
+        await self.http.close()
+
         if self.connected:
             self.client.close()
             self.client = None

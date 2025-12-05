@@ -29,6 +29,15 @@ function fireEvent(element, type, detail) {
   element.dispatchEvent(event);
 }
 
+function toList(value) {
+  return value
+    ? value
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v) => v)
+    : undefined;
+}
+
 const dialogHeading = (title) => html`
   <div class="header_title">
     <ha-icon-button
@@ -335,17 +344,57 @@ class DockerAddDialog extends LitElement {
   static get properties() {
     return {
       hass: { attribute: false },
-      data: { state: true },
+      _formData: { state: true },
     };
   }
 
+  static SCHEMA = [
+    { name: "image", selector: { text: {} } },
+    { name: "name", selector: { text: {} } },
+    { name: "network", selector: { text: {} } },
+    {
+      name: "ports",
+      label: "Ports (80:80, 443:443)",
+      selector: { text: {} },
+    },
+    {
+      name: "volumes",
+      label: "Volumes (/host:/container)",
+      selector: { text: {} },
+    },
+    {
+      name: "restart_policy",
+      label: "Restart Policy",
+      selector: {
+        select: {
+          mode: "dropdown",
+          options: [
+            { value: "no", label: "No" },
+            { value: "always", label: "Always" },
+            { value: "on-failure", label: "On Failure" },
+            { value: "unless-stopped", label: "Unless Stopped" },
+          ],
+        },
+      },
+    },
+  ];
+
   async showDialog(dialogParams) {
     this._dialogParams = dialogParams;
+    this._formData = {
+      image: "",
+      name: "",
+      network: "",
+      ports: "",
+      volumes: "",
+      restart_policy: "no",
+    };
     await this.updateComplete;
   }
 
   closeDialog() {
     this._dialogParams = undefined;
+    this._formData = undefined;
     fireEvent(this, "dialog-closed", { dialog: this.localName });
   }
 
@@ -354,26 +403,18 @@ class DockerAddDialog extends LitElement {
       return nothing;
     }
     const add = () => {
-      const image = this.shadowRoot.querySelector("#image").value;
-      const name = this.shadowRoot.querySelector("#name").value;
-      const network = this.shadowRoot.querySelector("#network").value;
-      const portsStr = this.shadowRoot.querySelector("#ports").value;
-      const volumesStr = this.shadowRoot.querySelector("#volumes").value;
-      const restart = this.shadowRoot.querySelector("#restart").value;
-
-      const ports = portsStr ? portsStr.split(",").map(p => p.trim()).filter(p => p) : undefined;
-      const volumes = volumesStr ? volumesStr.split(",").map(v => v.trim()).filter(v => v) : undefined;
-
-      const payload = {
+      const { image, name, network, ports, volumes, restart_policy } =
+        this._formData;
+      const portsList = toList(ports);
+      const volumesList = toList(volumes);
+      this.hass.callService("docker_integration", "create", {
         image,
         name,
         network: network || undefined,
-        ports: ports,
-        volumes: volumes,
-        restart_policy: restart || undefined
-      };
-
-      this.hass.callService("docker_integration", "create", payload);
+        ports: portsList,
+        volumes: volumesList,
+        restart_policy: restart_policy || undefined,
+      });
       this.closeDialog();
     };
 
@@ -386,27 +427,17 @@ class DockerAddDialog extends LitElement {
         @closed=${this.closeDialog}
       >
         <div class="content">
-          <ha-textfield id="image" label="Image" dialogInitialFocus></ha-textfield>
-          <ha-textfield id="name" label="Name"></ha-textfield>
-          <ha-textfield id="network" label="Network"></ha-textfield>
-          <ha-textfield id="ports" label="Ports (80:80, 443:443)"></ha-textfield>
-          <ha-textfield id="volumes" label="Volumes (/host:/container)"></ha-textfield>
-          <ha-select id="restart" label="Restart Policy">
-            <mwc-list-item value="no">No</mwc-list-item>
-            <mwc-list-item value="always">Always</mwc-list-item>
-            <mwc-list-item value="on-failure">On Failure</mwc-list-item>
-            <mwc-list-item value="unless-stopped">Unless Stopped</mwc-list-item>
-          </ha-select>
+          <ha-form
+            .hass=${this.hass}
+            .data=${this._formData}
+            .schema=${DockerAddDialog.SCHEMA}
+            @value-changed=${(ev) => (this._formData = ev.detail.value)}
+          ></ha-form>
         </div>
         <mwc-button slot="secondaryAction" @click=${this.closeDialog}>
           Cancel
         </mwc-button>
-        <mwc-button
-          slot="primaryAction"
-          @click=${add}
-        >
-          Add
-        </mwc-button>
+        <mwc-button slot="primaryAction" @click=${add}> Add </mwc-button>
       </ha-dialog>
     `;
   }
@@ -414,14 +445,14 @@ class DockerAddDialog extends LitElement {
   static styles = [
     css`
       .content {
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
+        width: 400px;
       }
-      ha-textfield, ha-select {
-        width: 100%;
+      @media all and (max-width: 450px) {
+        .content {
+          width: 100%;
+        }
       }
-    `
+    `,
   ];
 }
 

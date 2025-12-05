@@ -51,13 +51,13 @@ class DockerContainerUpdate(
         """Initialize the container power switch."""
         super().__init__(coordinator)
 
-        self._attr_name = device.name + " update"
+        self._attr_name = "container update"
         self._attr_title = "New container " + device.name
         self._attr_unique_id = get_unique_id(device.short_id, "containers", "update")
         self._attr_device_info = create_containers_device_info(device, coordinator)
 
         self._container_id = device.id
-        self._key = device.short_id
+        self._key = device.image_name
 
         self.coordinator = coordinator
         self.entity_id = f"{UPDATE_DOMAIN}.{self._attr_unique_id}"
@@ -74,5 +74,5 @@ class DockerContainerUpdate(
     def latest_version(self) -> str | None:
         return self.coordinator.data.get(self._key).new_ver
 
-    async def async_install(self) -> None:
+    async def async_install(self, version: str | None, backup: bool, **kwargs) -> None:
         await self.coordinator.api.async_container_update(self._container_id)

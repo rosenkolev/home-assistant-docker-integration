@@ -36,7 +36,7 @@ class ServiceController:
     async def async_shutdown(self):
         await self.data_coordinator.async_shutdown()
         await self.update_coordinator.async_shutdown()
-        self.api.disconnect()
+        await self.api.disconnect()
 
         # clean up because: self.data_coordinator.config_entry.runtime_data == self
         self.data_coordinator = None
