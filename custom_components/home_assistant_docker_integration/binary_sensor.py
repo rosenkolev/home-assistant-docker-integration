@@ -1,11 +1,10 @@
 from homeassistant.components.binary_sensor import DOMAIN as BINARY_SENSOR_DOMAIN
 from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import COORDINATOR, DOMAIN
-from .coordinator import DockerDataUpdateCoordinator, DockerImageInfo, DockerVolumeInfo
+from ._docker_api import DockerImageInfo, DockerVolumeInfo
+from .coordinator import DockerConfigEntry, DockerDataUpdateCoordinator
 from .entity import (
     BaseDeviceEntity,
     create_images_device_info,
@@ -15,12 +14,12 @@ from .entity import (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: DockerConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up binary sensor platform."""
 
-    coordinator: DockerDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
+    coordinator = entry.runtime_data.data_coordinator
 
     @callback
     def _add_container_entities() -> None:

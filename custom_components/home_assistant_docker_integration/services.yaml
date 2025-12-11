@@ -1,0 +1,67 @@
+create:
+  fields:
+    image:
+      required: true
+      selector:
+        text:
+    name:
+      required: true
+      selector:
+        text:
+    network:
+      required: false
+      network:
+        text:
+    ports:
+      required: false
+      selector:
+        object:
+    volumes:
+      required: false
+      selector:
+        object:
+    restart_policy:
+      required: false
+      selector:
+        select:
+          options:
+            - "no"
+            - "always"
+            - "on-failure"
+            - "unless-stopped"
+prune_volumes:
+  fields: {}
+prune_images:
+  fields: {}
+prune_containers:
+  fields: {}
+start:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+stop:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+restart:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+remove:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+logs:
+  fields:
+    id:
+      required: true
+      selector:
+        text:

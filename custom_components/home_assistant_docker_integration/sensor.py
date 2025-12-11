@@ -3,16 +3,20 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .const import COORDINATOR, DOMAIN
-from .coordinator import DockerContainerInfo, DockerDataUpdateCoordinator
-from .entity import BaseDeviceEntity
+from ._docker_api import DockerContainerInfo
+from .const import DOMAIN
+from .coordinator import (
+    DockerConfigEntry,
+    DockerDataUpdateCoordinator,
+    auto_add_containers_devices,
+)
+from .entity import BaseDeviceEntity, create_containers_device_info, get_unique_id
 
 DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -32,30 +36,25 @@ DOCKER_SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: DockerConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up sensor platform."""
 
-    coordinator: DockerDataUpdateCoordinator = hass.data[DOMAIN][COORDINATOR]
+    coordinator = entry.runtime_data.data_coordinator
 
     async_add_entities(
         DockerDiagnosticSensor(coordinator, entity_description)
         for entity_description in DOCKER_SENSOR_TYPES
     )
 
-    @callback
-    def _add_container_entities() -> None:
-        """Add Entities."""
-        if coordinator.tracker.added_containers:
-            async_add_entities(
-                DockerContainerStatusSensor(coordinator, device_id)
-                for device_id in coordinator.tracker.added_containers
-            )
-
-    # listen for new containers
-    _add_container_entities()
-    entry.async_on_unload(coordinator.async_add_listener(_add_container_entities))
+    auto_add_containers_devices(
+        entry,
+        async_add_entities,
+        lambda device_id, coordinator: DockerContainerStatusSensor(
+            coordinator, device_id
+        ),
+    )
 
 
 class DockerContainerStatusSensor(BaseDeviceEntity[DockerContainerInfo], SensorEntity):
@@ -68,12 +67,11 @@ class DockerContainerStatusSensor(BaseDeviceEntity[DockerContainerInfo], SensorE
         super().__init__(
             coordinator,
             device_id,
-            key="containers",
             name=dev.name,
         )
 
         self._init_entity_id(SENSOR_DOMAIN)
-        self._init_device_info(device_id, dev.name, dev.image_name)
+        self._attr_device_info = create_containers_device_info(dev, coordinator)
 
     @property
     def native_value(self) -> str:
@@ -94,8 +92,6 @@ class DockerContainerStatusSensor(BaseDeviceEntity[DockerContainerInfo], SensorE
 
 
 class DockerDiagnosticSensor(SensorEntity):
-    """Representation of a Sensor."""
-
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
@@ -105,13 +101,14 @@ class DockerDiagnosticSensor(SensorEntity):
         entity_description: SensorEntityDescription,
     ) -> None:
         """Initiate Sun Sensor."""
-        self.entity_description = entity_description
-        self._attr_unique_id = f"{DOMAIN}_host_{entity_description.key}"
-        self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
+        self._attr_unique_id = get_unique_id(entity_description.key, "host")
         self._coordinator = coordinator
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.config_entry.entry_id)}
         )
+
+        self.entity_description = entity_description
+        self.entity_id = f"{SENSOR_DOMAIN}.{self._attr_unique_id}"
 
     @property
     def available(self) -> bool:
