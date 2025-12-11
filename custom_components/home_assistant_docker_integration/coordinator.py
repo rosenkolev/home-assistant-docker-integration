@@ -55,7 +55,7 @@ class DockerDataUpdateCoordinator(DataUpdateCoordinator[DockerHostInfo]):
             update_interval=SCAN_INTERVAL,
         )
 
-        self.tracker = DeviceTracker(entry.entry_id)
+        self.tracker = DeviceTracker(hass, entry.entry_id)
         self.data: DockerHostInfo = {}
 
     @property
@@ -118,7 +118,8 @@ class DeviceTracker:
     added_volumes = set[str]()
     added_images = set[str]()
 
-    def __init__(self, service_id: str):
+    def __init__(self, hass: HomeAssistant, service_id: str):
+        self.hass = hass
         self.base_id = service_id
         self.service_device_id: str | None = None
 

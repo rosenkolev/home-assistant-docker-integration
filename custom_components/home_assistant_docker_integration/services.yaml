@@ -29,3 +29,39 @@ create:
             - "always"
             - "on-failure"
             - "unless-stopped"
+prune_volumes:
+  fields: {}
+prune_images:
+  fields: {}
+prune_containers:
+  fields: {}
+start:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+stop:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+restart:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+remove:
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+logs:
+  fields:
+    id:
+      required: true
+      selector:
+        text:

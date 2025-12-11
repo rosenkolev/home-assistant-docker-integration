@@ -374,6 +374,14 @@ class DockerApi:
             dangling,
         )
 
+    def async_container_logs(self, id: str):
+        return self.loop.run_in_executor(
+            None,
+            lambda client, id: client.containers.get(id).logs(tail=100).decode("utf-8"),
+            self.client,
+            id,
+        )
+
     def async_containers_prune(self):
         return self.loop.run_in_executor(
             None, lambda client: client.containers.prune(), self.client

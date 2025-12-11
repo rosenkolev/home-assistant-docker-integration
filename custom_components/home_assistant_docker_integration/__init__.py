@@ -18,7 +18,7 @@ from .services import async_register_services, async_remove_services
 
 PLATFORMS = [
     Platform.SENSOR,
-    Platform.SWITCH,
+    # Platform.SWITCH,
     Platform.BUTTON,
     Platform.BINARY_SENSOR,
     Platform.UPDATE,
@@ -32,7 +32,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType):
         hass, FRONTEND_URL, path="www", cache_headers=False
     )
     hass.data.setdefault(DOMAIN, {})[DATA_KEY_RESOURCE_REGISTRY] = (
-        FrontendResourcesRegistry(hass, version="0.50")
+        FrontendResourcesRegistry(hass, version="1.0")
     )
 
     if not hass.config_entries.async_entries(DOMAIN):
