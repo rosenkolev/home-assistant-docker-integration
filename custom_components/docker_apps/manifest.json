@@ -4,6 +4,10 @@
   "after_dependencies": [
     "hassio"
   ],
+  "categories": [
+    "computers_network.nas_servers",
+    "computers_network.monitoring"
+  ],
   "codeowners": [
     "@rosenkolev"
   ],
