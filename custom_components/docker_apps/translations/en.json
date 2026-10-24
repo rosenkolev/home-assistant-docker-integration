@@ -202,7 +202,7 @@
         },
         "upstream": {
           "name": "Upstream compose URL",
-          "description": "URL of the compose file of each release, with '{version}' where the version goes. Services the new version needs are then updated with the app."
+          "description": "URL of the compose file of each release. Write the word version in curly braces where the release version goes. Services the new version needs are then updated with the app."
         },
         "allow_db_minor": {
           "name": "Allow database minor updates",
