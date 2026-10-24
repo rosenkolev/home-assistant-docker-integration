@@ -244,6 +244,11 @@ class DockerClient:
             if buffer:
                 yield buffer
 
+    async def async_container_rename(self, id: str, name: str) -> None:
+        await self._json(
+            "POST", f"/containers/{quote(id)}/rename", params={"name": name}
+        )
+
     async def async_container_create(self, name: str | None, config: dict) -> str:
         data = await self._json(
             "POST",

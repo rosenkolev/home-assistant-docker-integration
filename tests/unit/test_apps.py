@@ -205,7 +205,8 @@ async def test__update_should_edit_env_once_back_up_and_recreate(setup, project)
     assert "DB_PASSWORD=secret" in env
     assert open(f"{project}/compose.yaml", encoding="utf-8").read() == COMPOSE
     assert ("pull", "ghcr.io/immich-app/immich-server:v2.2.0") in docker.calls
-    assert ("create", "immich_server") in docker.calls
+    assert ("create", "immich_server-docker-apps-new") in docker.calls
+    assert ("rename", "immich_server") in docker.calls
     assert ("create", "immich-redis-1") not in docker.calls
     history = manager.get("immich").history
     assert history[0]["version"] == "v2.1.0"

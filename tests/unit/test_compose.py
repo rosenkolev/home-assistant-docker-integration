@@ -1,4 +1,4 @@
-# cspell:words INITDB systempaths
+# cspell:words INITDB
 
 import pytest
 
@@ -15,6 +15,7 @@ from custom_components.docker_apps._compose import (
     size_bytes,
     start_order,
 )
+from custom_components.docker_apps._docker_client import DockerError
 from tests.fake_docker import FakeDocker
 
 COMPOSE = """
@@ -163,7 +164,9 @@ def test__build_container_config_ml_devices_and_limits():
     ]
     assert "immich_model-cache:/cache:rw" in host["Binds"]
     assert host["Memory"] == 2 * 1024**3
-    assert host["SecurityOpt"] == ["systempaths=unconfined"]
+    # CLI-only option: the docker CLI sends empty masked and read-only paths instead
+    assert "SecurityOpt" not in host
+    assert host["MaskedPaths"] == [] and host["ReadonlyPaths"] == []
 
 
 def test__build_container_config_shell_healthcheck_and_shm():
@@ -250,9 +253,28 @@ async def test__engine_up_should_keep_unchanged_and_recreate_changed():
 
     m.services["immich-server"]["image"] = "ghcr.io/immich-app/immich-server:v2.2.0"
     await engine.async_up(m)
-    assert ("remove", "immich_server") in docker.calls
-    assert ("create", "immich_server") in docker.calls
+    # the new container is created first, then the old one goes
+    create = docker.calls.index(("create", "immich_server-docker-apps-new"))
+    assert create < docker.calls.index(("remove", "immich_server"))
+    assert ("rename", "immich_server") in docker.calls
     assert len([c for c in docker.calls if c[0] == "create"]) == 1
+    names = [c["Names"][0] for c in docker.containers.values()]
+    assert "/immich_server" in names and len(names) == 4
+
+
+async def test__engine_up_should_keep_the_old_container_when_create_fails():
+    docker = FakeDocker()
+    engine = ComposeEngine(docker)
+    m = model()
+    await engine.async_up(m)
+    old = next(
+        c for c in docker.containers.values() if c["Names"] == ["/immich_server"]
+    )
+
+    m.services["immich-server"]["security_opt"] = ["label=invalid"]
+    with pytest.raises(DockerError, match="invalid --security-opt"):
+        await engine.async_up(m)
+    assert docker.containers[old["Id"]]["State"] == "running"
 
 
 async def test__engine_up_should_remove_orphans_and_down_should_clean_up():

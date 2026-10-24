@@ -178,6 +178,10 @@ class FakeDocker:
                 raise DockerError(
                     409, f"Conflict. The container name /{name} is already in use"
                 )
+        for option in config.get("HostConfig", {}).get("SecurityOpt") or []:
+            # like the engine: CLI-only and unknown options are refused
+            if option.startswith(("systempaths", "label=invalid")):
+                raise DockerError(500, f'invalid --security-opt 2: "{option}"')
         image = config["Image"]
         if image not in self.images:
             raise DockerError(404, f"No such image: {image}")
@@ -210,6 +214,11 @@ class FakeDocker:
         }
         self.calls.append(("create", name))
         return cid
+
+    async def async_container_rename(self, id: str, name: str) -> None:
+        c = self._get(id)
+        self.calls.append(("rename", name))
+        c["Names"] = [f"/{name}"]
 
     async def async_image_inspect(self, name: str) -> dict | None:
         if name in self.images:

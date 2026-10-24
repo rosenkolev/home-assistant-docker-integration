@@ -42,6 +42,9 @@ LABEL_VOLUME = "com.docker.compose.volume"
 LABEL_DEPENDS_ON = "com.docker.compose.depends_on"
 ENGINE_VERSION = "docker-apps"
 HEALTH_TIMEOUT = 600
+SYSTEMPATHS_UNCONFINED = "systempaths=unconfined"
+# name of a new container until the old one is removed
+NEW_SUFFIX = "-docker-apps-new"
 
 _VAR = re.compile(
     r"\$(?:(?P<escaped>\$)|\{(?P<braced>[^}]+)\}|(?P<named>[A-Za-z_][A-Za-z0-9_]*))"
@@ -547,7 +550,7 @@ def build_container_config(
         "CapAdd": service.get("cap_add"),
         "CapDrop": service.get("cap_drop"),
         "Privileged": bool(service.get("privileged")),
-        "SecurityOpt": service.get("security_opt"),
+        "SecurityOpt": _security_opt(service),
         "ExtraHosts": _extra_hosts(service.get("extra_hosts")),
         "Dns": _as_list(service["dns"]) if service.get("dns") else None,
         "DnsSearch": (
@@ -634,8 +637,23 @@ def build_container_config(
         config["NetworkingConfig"] = {"EndpointsConfig": {first: endpoint}}
 
     config = _drop_none(config)
+    if SYSTEMPATHS_UNCONFINED in (service.get("security_opt") or []):
+        # set after _drop_none: empty lists are the point here
+        config["HostConfig"]["MaskedPaths"] = []
+        config["HostConfig"]["ReadonlyPaths"] = []
     config["Labels"][LABEL_CONFIG_HASH] = config_hash(config)
     return config
+
+
+def _security_opt(service: dict) -> list[str] | None:
+    """Security options for the API; `systempaths=unconfined` is CLI-only.
+
+    The docker CLI turns it into empty MaskedPaths and ReadonlyPaths instead.
+    """
+    options = [
+        str(o) for o in service.get("security_opt") or [] if o != SYSTEMPATHS_UNCONFINED
+    ]
+    return options or None
 
 
 def config_hash(config: dict) -> str:
@@ -920,10 +938,16 @@ class ComposeEngine:
         image_id = await self._image_id(config["Image"])
         wanted_hash = config["Labels"][LABEL_CONFIG_HASH]
 
+        target = container_name(model, name)
+        temporary = f"{target}{NEW_SUFFIX}"
         keep = None
+        old = []
         for raw in current:
             labels = raw.get("Labels") or {}
-            if (
+            if raw.get("Names") == [f"/{temporary}"]:
+                # left over from an earlier run that failed half way
+                await self.async_remove(raw["Id"])
+            elif (
                 not force
                 and keep is None
                 and labels.get(LABEL_CONFIG_HASH) == wanted_hash
@@ -931,16 +955,24 @@ class ComposeEngine:
             ):
                 keep = raw
             else:
-                await self.async_remove(raw["Id"])
+                old.append(raw)
 
         if keep is not None:
+            for raw in old:
+                await self.async_remove(raw["Id"])
             if keep.get("State") != "running":
                 await self.client.async_container_action(keep["Id"], "start")
             return keep["Id"]
 
+        # create before removing the old container: a config that Docker refuses
+        # leaves the running app as it is
         container_id = await self.client.async_container_create(
-            container_name(model, name), config
+            temporary if old else target, config
         )
+        for raw in old:
+            await self.async_remove(raw["Id"])
+        if old:
+            await self.client.async_container_rename(container_id, target)
         networks = service_networks(model, model.services[name])
         for extra in list(networks)[1:]:
             endpoint = dict(networks[extra])
