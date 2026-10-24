@@ -7,6 +7,8 @@ import time
 
 import aiohttp
 
+from ._models import split_image
+
 MANIFEST_ACCEPT = ", ".join(
     (
         "application/vnd.oci.image.index.v1+json",
@@ -26,14 +28,12 @@ class RegistryError(Exception):
 
 
 def parse_reference(image: str) -> tuple[str, str, str]:
-    """Return (registry host, repository, tag or digest) for an image reference."""
-    reference = "latest"
-    if "@" in image:
-        image, reference = image.split("@", 1)
-    else:
-        last = image.rsplit("/", 1)[-1]
-        if ":" in last:
-            image, reference = image.rsplit(":", 1)
+    """Return (registry host, repository, tag or digest) for an image reference.
+
+    A pinned `repo:tag@digest` gives the digest, and the repository without the tag.
+    """
+    image, tag, digest = split_image(image)
+    reference = digest or tag or "latest"
 
     parts = image.split("/", 1)
     if len(parts) == 1 or not (
