@@ -26,6 +26,9 @@ jobs:
         run: ruff check --output-format=github .
       - name: Spell Check
         uses: streetsidesoftware/cspell-action@v9
+        with:
+          # check every file: after a force push the previous commit is gone
+          incremental_files_only: false
       - name: Test with pytest
         run: coverage run --data-file reports/.coverage -m pytest -v -s
       - name: Generate Coverage Report Summary
