@@ -39,6 +39,7 @@
     "selfupdate",
     "traefik",
     "valkey",
+    "vectorchord",
     "venv"
   ]
 }

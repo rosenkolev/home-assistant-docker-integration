@@ -1,6 +1,6 @@
 """App lifecycle: managed state, update checks, updates, rollback, store installs."""
 
-# cspell:words clickhouse keydb opensearch pgvecto vectorchord
+# cspell:words clickhouse keydb opensearch pgvecto
 
 from __future__ import annotations
 

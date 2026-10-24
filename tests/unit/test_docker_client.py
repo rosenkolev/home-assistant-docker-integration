@@ -1,4 +1,4 @@
-# cspell:words pihole
+# cspell:words pgvectors pihole
 
 import struct
 
