@@ -1,0 +1,133 @@
+logs:
+  fields:
+    app:
+      selector:
+        text:
+    container:
+      selector:
+        text:
+    tail:
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 5000
+          mode: box
+    since:
+      selector:
+        number:
+          min: 0
+          mode: box
+manage:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    managed:
+      selector:
+        boolean:
+    launcher:
+      selector:
+        boolean:
+    services:
+      selector:
+        text:
+          multiple: true
+    include:
+      selector:
+        text:
+    exclude:
+      selector:
+        text:
+    upstream:
+      selector:
+        text:
+          type: url
+    allow_db_minor:
+      selector:
+        boolean:
+update_services:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    services:
+      required: true
+      selector:
+        text:
+          multiple: true
+    tag:
+      selector:
+        text:
+recreate:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    pull:
+      default: false
+      selector:
+        boolean:
+container_start:
+  fields:
+    container:
+      required: true
+      selector:
+        text:
+container_stop:
+  fields:
+    container:
+      required: true
+      selector:
+        text:
+container_restart:
+  fields:
+    container:
+      required: true
+      selector:
+        text:
+prune:
+  fields:
+    kind:
+      required: true
+      selector:
+        select:
+          translation_key: prune_kind
+          options:
+            - containers
+            - images
+            - images_unused
+            - volumes
+            - networks
+            - build_cache
+check_updates:
+  fields:
+    repositories:
+      default: false
+      selector:
+        boolean:
+install:
+  fields:
+    store_app:
+      required: true
+      selector:
+        text:
+    name:
+      selector:
+        text:
+    values:
+      selector:
+        object:
+uninstall:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    remove_data:
+      default: false
+      selector:
+        boolean:

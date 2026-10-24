@@ -1,0 +1,328 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Docker",
+        "description": "Home Assistant needs access to the Docker engine. Mount `/var/run/docker.sock` into the Home Assistant container, or use a socket proxy (`tcp://host:2375`).",
+        "data": {
+          "docker_url": "Docker URL"
+        }
+      },
+      "folders": {
+        "title": "App folders",
+        "description": "Host folders for apps. Existing compose projects suggest these defaults. To install and update apps, mount the apps folder into the Home Assistant container at the same path.",
+        "data": {
+          "apps_root": "Apps folder (compose projects)",
+          "data_root": "App data folder",
+          "read_only": "Read-only (monitor only, no actions)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't connect to Docker. Check the socket mount or URL."
+    },
+    "abort": {
+      "single_instance_allowed": "Docker Apps is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Docker Apps options",
+        "data": {
+          "apps_root": "Apps folder (compose projects)",
+          "data_root": "App data folder",
+          "read_only": "Read-only (monitor only, no actions)",
+          "update_hours": "Update check interval",
+          "untracked_images": "Untracked images"
+        },
+        "data_description": {
+          "untracked_images": "Comma separated parts of image names. Services with these images (databases by default) are not updated with their app, unless you track them per app."
+        }
+      }
+    }
+  },
+  "config_subentries": {
+    "repository": {
+      "initiate_flow": {
+        "user": "Add app store repository"
+      },
+      "entry_type": "App store repository",
+      "step": {
+        "user": {
+          "title": "Add app store repository",
+          "description": "Pick a known repository or paste a URL: a GitHub repository or a `.zip` / `.tar.gz` archive.",
+          "data": {
+            "url": "Repository URL",
+            "kind": "Format"
+          }
+        }
+      },
+      "error": {
+        "cannot_fetch": "The repository can't be downloaded: {error}",
+        "no_apps": "No apps found in this repository.",
+        "unknown_kind": "The format can't be detected. Choose it."
+      },
+      "abort": {
+        "already_configured": "This repository is already added."
+      }
+    }
+  },
+  "selector": {
+    "repository_kind": {
+      "options": {
+        "casaos": "CasaOS",
+        "runtipi": "Runtipi"
+      }
+    },
+    "prune_kind": {
+      "options": {
+        "containers": "Stopped containers",
+        "images": "Dangling images",
+        "images_unused": "All unused images",
+        "volumes": "Unused volumes",
+        "networks": "Unused networks",
+        "build_cache": "Build cache"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "running": "Running",
+          "partial": "Partly running",
+          "starting": "Starting",
+          "unhealthy": "Unhealthy",
+          "stopped": "Stopped",
+          "updating": "Updating"
+        }
+      },
+      "cpu": {
+        "name": "CPU"
+      },
+      "memory": {
+        "name": "Memory"
+      },
+      "containers_running": {
+        "name": "Running containers"
+      },
+      "images": {
+        "name": "Images"
+      },
+      "reclaimable": {
+        "name": "Reclaimable space"
+      }
+    },
+    "switch": {
+      "power": {
+        "name": "Running"
+      }
+    },
+    "button": {
+      "restart": {
+        "name": "Restart"
+      }
+    },
+    "update": {
+      "update": {
+        "name": "Update"
+      }
+    }
+  },
+  "issues": {
+    "apps_root_not_mounted": {
+      "title": "Apps folder is not mounted",
+      "description": "The apps folder `{path}` is not mounted into the Home Assistant container, so apps can be monitored but not installed or updated. Add `{path}:{path}` to the volumes of the Home Assistant container and restart it."
+    },
+    "data_root_not_mounted": {
+      "title": "App data folder is not mounted",
+      "description": "The app data folder `{path}` is not mounted into the Home Assistant container. Apps can be installed (Docker creates their data folders), but Home Assistant can't delete their data when they are removed. Add `{path}:{path}` to the volumes of the Home Assistant container and restart it."
+    },
+    "update_on_hold": {
+      "title": "Update of {app} is on hold",
+      "description": "{reason}\n\nBack up the database (for example with a dump), upgrade the database service with the `docker_apps.update_services` action or by hand, check that the app works, and the app update is offered again."
+    },
+    "supervised": {
+      "title": "Docker Apps on Home Assistant Supervised",
+      "description": "The Supervisor marks a system as unsupported when it runs containers it doesn't manage. Docker Apps is made for Home Assistant Container installs."
+    }
+  },
+  "services": {
+    "logs": {
+      "name": "Logs",
+      "description": "Return the recent log lines of an app or a container.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "container": {
+          "name": "Container",
+          "description": "Container key (project/service), name or ID."
+        },
+        "tail": {
+          "name": "Lines",
+          "description": "Number of lines per container."
+        },
+        "since": {
+          "name": "Since",
+          "description": "Only lines after this Unix timestamp."
+        }
+      }
+    },
+    "manage": {
+      "name": "Manage app",
+      "description": "Change how an app is managed: update checks, tracked services, tag filters and the app launcher.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "managed": {
+          "name": "Managed",
+          "description": "Check for updates and allow updates."
+        },
+        "launcher": {
+          "name": "Show in app launcher",
+          "description": "Show the app in the Docker Apps dashboard card."
+        },
+        "services": {
+          "name": "Services",
+          "description": "Services to update with the app. Empty: all except untracked images (databases and caches)."
+        },
+        "include": {
+          "name": "Include tags",
+          "description": "Only consider tags matching this regular expression."
+        },
+        "exclude": {
+          "name": "Exclude tags",
+          "description": "Ignore tags matching this regular expression."
+        },
+        "upstream": {
+          "name": "Upstream compose URL",
+          "description": "URL of the compose file of each release, with {version} where the version goes. Services the new version needs are then updated with the app."
+        },
+        "allow_db_minor": {
+          "name": "Allow database minor updates",
+          "description": "Update database images within the same major version when a new app version needs it."
+        }
+      }
+    },
+    "update_services": {
+      "name": "Update services",
+      "description": "Update single services of an app, also untracked ones, to their newest tag or to a given tag.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "services": {
+          "name": "Services",
+          "description": "Service names."
+        },
+        "tag": {
+          "name": "Tag",
+          "description": "Tag to use. Empty: the newest tag of the same kind."
+        }
+      }
+    },
+    "recreate": {
+      "name": "Recreate app",
+      "description": "Bring the app up again from its compose files.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "pull": {
+          "name": "Pull",
+          "description": "Pull images first; only changed containers are recreated."
+        }
+      }
+    },
+    "container_start": {
+      "name": "Start container",
+      "description": "Start one container.",
+      "fields": {
+        "container": {
+          "name": "Container",
+          "description": "Container key, name or ID."
+        }
+      }
+    },
+    "container_stop": {
+      "name": "Stop container",
+      "description": "Stop one container.",
+      "fields": {
+        "container": {
+          "name": "Container",
+          "description": "Container key, name or ID."
+        }
+      }
+    },
+    "container_restart": {
+      "name": "Restart container",
+      "description": "Restart one container.",
+      "fields": {
+        "container": {
+          "name": "Container",
+          "description": "Container key, name or ID."
+        }
+      }
+    },
+    "prune": {
+      "name": "Prune",
+      "description": "Remove unused Docker resources.",
+      "fields": {
+        "kind": {
+          "name": "What",
+          "description": "What to remove."
+        }
+      }
+    },
+    "check_updates": {
+      "name": "Check for updates",
+      "description": "Check managed apps for updates now.",
+      "fields": {
+        "repositories": {
+          "name": "Refresh repositories",
+          "description": "Download the app store repositories again."
+        }
+      }
+    },
+    "install": {
+      "name": "Install app",
+      "description": "Install an app from an app store repository.",
+      "fields": {
+        "store_app": {
+          "name": "Store app",
+          "description": "Store app ID (repository.app)."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Project name. Default: the app name."
+        },
+        "values": {
+          "name": "Values",
+          "description": "Values for the app variables."
+        }
+      }
+    },
+    "uninstall": {
+      "name": "Uninstall app",
+      "description": "Stop and remove the containers and networks of an app.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "remove_data": {
+          "name": "Remove data",
+          "description": "Also delete the app and data folders (store apps only)."
+        }
+      }
+    }
+  }
+}
