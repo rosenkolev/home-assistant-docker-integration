@@ -4,7 +4,7 @@ Every source is turned into the same normalized `StoreApp`. Rendering an app giv
 plain compose file plus a `.env`, so installed apps are ordinary compose projects.
 """
 
-# cspell:words armhf armv
+# cspell:words armhf armv Selkies
 
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ KINDS = (KIND_CASAOS, KIND_RUNTIPI)
 ARCH_ALIASES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm", "armhf": "arm"}
 _GITHUB = re.compile(r"^https://github\.com/([^/]+)/([^/#?]+?)(?:\.git)?/?$")
 _SAFE_ID = re.compile(r"[^a-z0-9_-]+")
+# linuxserver.io desktop images (Selkies) serve HTTP on 3000 and HTTPS on 3001; the
+# desktop stream only works over HTTPS
+LINUXSERVER_IMAGES = ("linuxserver/", "lscr.io/linuxserver/", "ghcr.io/linuxserver/")
 
 
 @dataclass
@@ -62,6 +65,8 @@ class StoreApp:
     main_service: str | None = None
     web_port: int | None = None
     web_path: str = "/"
+    web_target: int | None = None  # container port of the web UI
+    web_scheme: str = "http"
     variables: list[StoreVariable] = field(default_factory=list)
     compose: str | None = None
 
@@ -137,6 +142,40 @@ def _hash(*parts: str) -> str:
     return "sha256:" + digest.hexdigest()[:32]
 
 
+def _port_pairs(service: dict) -> list[tuple[str, str]]:
+    """(published, target) of each port of a compose service, as text."""
+    pairs = []
+    for port in service.get("ports") or []:
+        if isinstance(port, dict):
+            pairs.append((str(port.get("published") or ""), str(port.get("target"))))
+        else:
+            parts = str(port).split("/")[0].split(":")
+            pairs.append((parts[-2] if len(parts) >= 2 else "", parts[-1]))
+    return pairs
+
+
+def web_endpoint(
+    service: dict, published: str | None, scheme: str | None = None
+) -> tuple[int | None, int | None, str]:
+    """(host port, container port, scheme) of the web UI of a store app.
+
+    `published` is the host port the store names for the web UI. The scheme comes
+    from the store, or from the image when it is known to need HTTPS.
+    """
+    pairs = _port_pairs(service)
+    target = next((t for p, t in pairs if published and p == published), None)
+    image = str(service.get("image") or "")
+    if target == "3000" and image.startswith(LINUXSERVER_IMAGES):
+        https = next((p for p, t in pairs if t == "3001"), None)
+        if https is not None:
+            return (int(https) if https.isdigit() else None), 3001, "https"
+    return (
+        int(published) if published and published.isdigit() else None,
+        int(target) if target and target.isdigit() else None,
+        scheme if scheme in ("http", "https") else "http",
+    )
+
+
 # --- CasaOS ---
 
 
@@ -156,6 +195,9 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
     version = str(
         meta.get("version") or split_image(str(main.get("image", "")))[1] or ""
     )
+    web_port, web_target, web_scheme = web_endpoint(
+        main, port, str(meta.get("scheme") or "").lower()
+    )
     return StoreApp(
         id=f"{repo_id}.{app_id}",
         repo_id=repo_id,
@@ -174,8 +216,10 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
         release_notes=_localized(meta.get("release_notes")) or None,
         content_hash=_hash(text),
         main_service=meta.get("main"),
-        web_port=int(port) if port.isdigit() else None,
+        web_port=web_port,
         web_path=str(meta.get("index") or "/"),
+        web_target=web_target,
+        web_scheme=web_scheme,
         compose=text,
     )
 
@@ -235,6 +279,16 @@ def parse_runtipi(
         if field_.get("env_variable")
     ]
 
+    services = (yaml.safe_load(compose) or {}).get("services") or {}
+    main = next(
+        (
+            s
+            for s in services.values()
+            if isinstance(s, dict) and "${APP_PORT}" in str(s.get("ports"))
+        ),
+        {},
+    )
+    web_port, web_target, web_scheme = web_endpoint(main, "${APP_PORT}")
     return StoreApp(
         id=f"{repo_id}.{app_id}",
         repo_id=repo_id,
@@ -250,7 +304,9 @@ def parse_runtipi(
         website=config.get("website"),
         source=config.get("source"),
         content_hash=_hash(config_text, compose),
-        web_port=config.get("port"),
+        web_port=config.get("port") if web_target != 3001 else web_port,
+        web_target=web_target,
+        web_scheme=web_scheme,
         variables=variables,
         compose=compose,
     )
@@ -375,6 +431,7 @@ def render_app(
                 "APP_EXPOSED": "false",
             }
         )
+    _drop_desktop_http_port(data)
     for variable in app.variables:
         value = values.get(variable.key)
         if value is None:
@@ -387,6 +444,25 @@ def render_app(
     for key, value in values.items():
         env.setdefault(key, str(value))
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True), env
+
+
+def _drop_desktop_http_port(data: dict) -> None:
+    """Don't publish the HTTP port of linuxserver.io desktop images.
+
+    It only shows an error that HTTPS is needed, and it often clashes with other
+    apps on 3000; the web UI is the HTTPS port 3001.
+    """
+    for service in (data.get("services") or {}).values():
+        if not isinstance(service, dict):
+            continue
+        targets = [t for _, t in _port_pairs(service)]
+        image = str(service.get("image") or "")
+        if image.startswith(LINUXSERVER_IMAGES) and {"3000", "3001"} <= set(targets):
+            service["ports"] = [
+                port
+                for port, target in zip(service["ports"], targets, strict=True)
+                if target != "3000"
+            ]
 
 
 def publish_web_port(data: dict, app: StoreApp, port: str) -> None:

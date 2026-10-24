@@ -244,3 +244,35 @@ def test__casaos_without_version_uses_the_image_tag():
     assert app.package_version.startswith(
         "sha256:"
     )  # hash still detects package changes
+
+
+VSCODE = """
+services:
+  app:
+    image: linuxserver/vscode:1.142.0
+    ports:
+      - target: 3000
+        published: 3000
+      - target: 3001
+        published: 3001
+x-casaos:
+  main: app
+  port_map: "3000"
+  title:
+    en_us: Vscode
+"""
+
+
+def test__desktop_images_use_https():
+    app = parse_casaos_compose(VSCODE, "bb")
+    assert (app.web_port, app.web_target, app.web_scheme) == (3001, 3001, "https")
+    compose, _ = render_app(app, "vscode", "/data/vscode", "/data", {}, {})
+    ports = yaml.safe_load(compose)["services"]["app"]["ports"]
+    assert [p["target"] for p in ports] == [3001]  # the HTTP port isn't published
+
+
+def test__store_scheme_is_used():
+    text = CASAOS.replace("\nx-casaos:\n", "\nx-casaos:\n  scheme: https\n", 1)
+    app = parse_casaos_compose(text, "repo")
+    assert app.web_scheme == "https"
+    assert parse_casaos_compose(CASAOS, "repo").web_scheme == "http"

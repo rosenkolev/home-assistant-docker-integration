@@ -2,7 +2,11 @@
 
 import struct
 
+import pytest
+
 from custom_components.docker_apps._docker_client import (
+    DockerClient,
+    DockerConnectionError,
     _clean_params,
     build_docker_data,
     container_key,
@@ -193,3 +197,16 @@ def test__path_map():
     assert paths.to_local("/srv/apps/immich/.env") == "/immich/.env"
     assert paths.to_local("/opt/other") is None
     assert PathMap(None).to_local("/x") == "/x"
+
+
+async def test__timeout_gives_a_clear_error():
+    class SlowSession:
+        closed = False
+
+        async def request(self, *args, **kwargs):
+            raise TimeoutError
+
+    client = DockerClient("tcp://docker:2375")
+    client._session = SlowSession()
+    with pytest.raises(DockerConnectionError, match="in time"):
+        await client.async_images()

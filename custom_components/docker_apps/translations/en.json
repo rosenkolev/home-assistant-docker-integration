@@ -272,6 +272,24 @@
         }
       }
     },
+    "set_environment": {
+      "name": "Set environment variables",
+      "description": "Change environment variables of an app service, such as a password. They are kept in compose.override.yaml, and the app is recreated.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "service": {
+          "name": "Service",
+          "description": "Service name in the compose file."
+        },
+        "variables": {
+          "name": "Variables",
+          "description": "Variables to set, for example PASSWORD: my-secret."
+        }
+      }
+    },
     "prune": {
       "name": "Prune",
       "description": "Remove unused Docker resources.",

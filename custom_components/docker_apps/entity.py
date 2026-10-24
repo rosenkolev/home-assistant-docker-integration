@@ -25,19 +25,31 @@ def app_identifier(entry_id: str, app_key: str) -> tuple[str, str]:
     return (DOMAIN, f"{entry_id}_{app_key}")
 
 
-def app_web(runtime: DockerAppsRuntime, app: AppInfo) -> tuple[str, str] | None:
-    """Port and path of the app web UI: the store port, else the first published TCP port."""
+def app_web(runtime: DockerAppsRuntime, app: AppInfo) -> tuple[str, str, str] | None:
+    """Port, path and scheme of the app web UI.
+
+    For a store app, the host port published for its web container port; else the
+    store port, else the first published TCP port.
+    """
     store = runtime.manager.get(app.key).store or {}
-    port = store.get("web_port") or next(
-        (
-            mapping.split(":", 1)[0]
-            for container in runtime.docker.data.app_containers(app.key)
-            for mapping in container.ports
-            if mapping.endswith("/tcp")
-        ),
-        None,
+    target, scheme = store.get("web_target"), store.get("web_scheme")
+    if store and "web_target" not in store:
+        # installed before the web port was stored: take it from the catalog
+        if listed := runtime.catalog.apps.get(f"{store['repo_id']}.{store['app_id']}"):
+            target, scheme = listed.web_target, listed.web_scheme
+    mappings = [
+        mapping.removesuffix("/tcp").split(":", 1)
+        for container in runtime.docker.data.app_containers(app.key)
+        for mapping in container.ports
+        if mapping.endswith("/tcp")
+    ]
+    port = next(
+        (host for host, inner in mappings if target and inner == str(target)), None
     )
-    return (str(port), store.get("web_path") or "/") if port else None
+    port = port or store.get("web_port") or next((host for host, _ in mappings), None)
+    if not port:
+        return None
+    return str(port), store.get("web_path") or "/", scheme or "http"
 
 
 def app_web_url(
@@ -54,7 +66,7 @@ def app_web_url(
         host = urlparse(get_url(hass, allow_external=False)).hostname
     except NoURLAvailableError:
         host = None
-    return f"http://{host or 'localhost'}:{web[0]}{web[1]}"
+    return f"{web[2]}://{host or 'localhost'}:{web[0]}{web[1]}"
 
 
 def app_device_info(
@@ -95,9 +107,7 @@ def async_remove_stale_devices(
     }
     for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
         if not device.identifiers & keep:
-            registry.async_update_device(
-                device.id, remove_config_entry_id=entry.entry_id
-            )
+            registry.async_remove_device(device.id)
 
 
 class HostEntity(CoordinatorEntity):
