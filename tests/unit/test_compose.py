@@ -1,4 +1,4 @@
-# cspell:words systempaths
+# cspell:words INITDB systempaths
 
 import pytest
 

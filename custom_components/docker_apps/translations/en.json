@@ -202,7 +202,7 @@
         },
         "upstream": {
           "name": "Upstream compose URL",
-          "description": "Compose file of each release, with {version}, e.g. https://github.com/immich-app/immich/releases/download/{version}/docker-compose.yml. Used to update required services with the app."
+          "description": "URL of the compose file of each release, with {version} where the version goes. Services the new version needs are then updated with the app."
         },
         "allow_db_minor": {
           "name": "Allow database minor updates",
