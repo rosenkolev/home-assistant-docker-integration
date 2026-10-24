@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._compose import load_model
+from custom_components.docker_apps._registry import RegistryError
 from custom_components.docker_apps.apps import AppError, AppManager, own_container_id
 from tests.fake_docker import FakeDocker, FakeRegistry
 
@@ -168,6 +169,27 @@ async def test__check_updates_only_for_managed_apps(setup):
     }
     redis = next(s for s in update.services if s.service == "redis")
     assert not redis.tracked and redis.latest == "8.1"
+
+
+async def test__untracked_image_that_fails_does_not_fail_the_check(setup, monkeypatch):
+    manager, _, data = setup
+    registry = manager.registry
+    tags = registry.async_tags
+
+    async def postgres_fails(image):
+        if image.startswith("postgres"):
+            raise RegistryError("GET .../tags/list: 404")
+        return await tags(image)
+
+    monkeypatch.setattr(registry, "async_tags", postgres_fails)
+    await manager.async_configure("immich", managed=True)
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    assert update.error is None
+    assert update.latest_version == "v2.2.0"
+
+    await manager.async_configure("immich", services=["immich-server", "database"])
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    assert "database" in update.error and update.latest_version == "v2.2.0"
 
 
 async def test__update_should_edit_env_once_back_up_and_recreate(setup, project):

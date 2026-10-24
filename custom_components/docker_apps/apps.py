@@ -363,14 +363,29 @@ class AppManager:
             return AppUpdate(app_key, installed, latest, store_app=store_app)
 
         services = []
+        errors = []
         for service, (image, tracked) in self.service_images(app_key, data).items():
-            result = await self._async_check_service(service, image, settings)
+            try:
+                result = await self._async_check_service(service, image, settings)
+            except (RegistryError, DockerError, ValueError) as err:
+                # one image that can't be checked doesn't hide the others
+                _LOGGER.debug(
+                    "Update check for %s/%s failed: %s", app_key, service, err
+                )
+                tag = split_image(image)[1] or "latest"
+                result = ServiceUpdate(service, image, tag, tag, "tag")
+                if tracked:
+                    errors.append(f"{service}: {err}")
             result.tracked = tracked
             services.append(result)
 
         primary = primary_service(app_key, [s for s in services if s.tracked])
         update = AppUpdate(
-            app_key, primary.current if primary else None, None, services
+            app_key,
+            primary.current if primary else None,
+            None,
+            services,
+            error="; ".join(errors) or None,
         )
         if primary and primary.has_update and settings.upstream:
             await self._async_apply_upstream(update, primary, settings)

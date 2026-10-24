@@ -161,6 +161,11 @@ def test__split_image_and_reference():
         "valkey/valkey",
         "8",
     )
+    # pinned with tag and digest (Immich postgres)
+    assert parse_reference(
+        "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:abc"
+    ) == ("ghcr.io", "immich-app/postgres", "sha256:abc")
+    assert parse_reference("localhost:5000/b:1") == ("localhost:5000", "b", "1")
 
 
 def test__path_map():
