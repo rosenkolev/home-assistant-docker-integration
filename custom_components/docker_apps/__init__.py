@@ -49,13 +49,19 @@ from .coordinator import (
     StatsCoordinator,
     UpdatesCoordinator,
 )
-from .entity import app_identifier, async_remove_stale_devices, host_identifier
+from .entity import (
+    app_identifier,
+    async_forget_app,
+    async_remove_stale_devices,
+    async_update_app_devices,
+    host_identifier,
+)
 from .services import async_register_services
 from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.BUTTON, Platform.SENSOR, Platform.SWITCH, Platform.UPDATE]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PANEL_VERSION = "19"
+PANEL_VERSION = "27"
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -84,10 +90,11 @@ def _repositories(entry: DockerAppsConfigEntry) -> list[Repository]:
 async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -> bool:
     config = {**entry.data, **entry.options}
     client = DockerClient(config.get(CONF_DOCKER_URL, DEFAULT_DOCKER_URL))
+    # also runs when the setup fails half way
+    entry.async_on_unload(client.async_close)
     try:
         await client.async_connect()
     except DockerError as err:
-        await client.async_close()
         raise ConfigEntryNotReady(f"Docker is not reachable: {err}") from err
 
     session = async_get_clientsession(hass)
@@ -122,14 +129,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
             config.get(CONF_UPDATE_HOURS, DEFAULT_UPDATE_HOURS),
         ),
         read_only=config.get(CONF_READ_ONLY, False),
+        options=dict(entry.options),
     )
     entry.runtime_data = runtime
 
-    try:
-        await docker.async_config_entry_first_refresh()
-    except ConfigEntryNotReady:
-        await client.async_close()
-        raise
+    await docker.async_config_entry_first_refresh()
     await runtime.stats.async_refresh()
 
     host = docker.data.host
@@ -157,6 +161,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
         hass, runtime.updates.async_refresh(), f"{DOMAIN} updates"
     )
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
+    entry.async_on_unload(
+        docker.async_add_listener(lambda: async_update_app_devices(hass, entry))
+    )
 
     _check_issues(hass, manager)
 
@@ -175,8 +182,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
 async def _async_entry_updated(
     hass: HomeAssistant, entry: DockerAppsConfigEntry
 ) -> None:
-    """Repositories (subentries) changed: reload the catalog without a full reload."""
+    """Options changed: reload. Repositories changed: reload only the catalog."""
     runtime = entry.runtime_data
+    if dict(entry.options) != runtime.options:
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
     repositories = _repositories(entry)
     if {r.id for r in repositories} != set(runtime.catalog.repositories):
         await runtime.catalog.async_load(repositories)
@@ -210,14 +220,22 @@ def _check_issues(hass: HomeAssistant, manager: AppManager) -> None:
             severity=ir.IssueSeverity.WARNING,
             translation_key="supervised",
         )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, "supervised")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         async_remove_panel(hass, PANEL_URL, warn_if_unknown=False)
-        await entry.runtime_data.client.async_close()
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -> None:
+    """Remove the repair issues of this integration."""
+    for domain, issue_id in list(ir.async_get(hass).issues):
+        if domain == DOMAIN:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
 
 
 async def async_remove_config_entry_device(
@@ -227,6 +245,9 @@ async def async_remove_config_entry_device(
     if host_identifier(entry.entry_id) in device.identifiers:
         return False
     data = entry.runtime_data.docker.data
-    return not any(
+    if any(
         app_identifier(entry.entry_id, key) in device.identifiers for key in data.apps
-    )
+    ):
+        return False
+    async_forget_app(entry, device)
+    return True

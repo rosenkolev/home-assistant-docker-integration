@@ -21,7 +21,7 @@ async def async_get_config_entry_diagnostics(
     updates = runtime.updates.data or {}
     return {
         "options": {**entry.data, **entry.options},
-        "host": asdict(data.host) if data else None,
+        "host": asdict(data.host),
         "self_container": runtime.manager.self_container_id,
         "mounts": runtime.manager.paths.as_list(),
         "apps": {
@@ -51,7 +51,7 @@ async def async_get_config_entry_diagnostics(
                     else None
                 ),
             }
-            for key, app in (data.apps.items() if data else [])
+            for key, app in data.apps.items()
         },
         # redacts the store values of each app and of its history entries
         "settings": async_redact_data(

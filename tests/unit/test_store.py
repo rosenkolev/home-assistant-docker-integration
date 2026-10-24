@@ -276,3 +276,16 @@ def test__store_scheme_is_used():
     app = parse_casaos_compose(text, "repo")
     assert app.web_scheme == "https"
     assert parse_casaos_compose(CASAOS, "repo").web_scheme == "http"
+
+
+def test__env_values_with_quotes_survive_a_round_trip():
+    from custom_components.docker_apps._compose import parse_env_file
+
+    values = {
+        "A": "it's",
+        "B": 'say "hi"',
+        "C": "both ' and \"",
+        "D": "a b",
+        "E": "plain",
+    }
+    assert parse_env_file(format_env(values)) == values

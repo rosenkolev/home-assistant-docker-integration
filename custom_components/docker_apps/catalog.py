@@ -53,9 +53,9 @@ async def async_fetch_repository(
             return None, etag
         if resp.status >= 400:
             raise CatalogError(f"{download}: HTTP {resp.status}")
-        if (resp.content_length or 0) > MAX_ARCHIVE:
+        raw = await resp.content.read(MAX_ARCHIVE + 1)
+        if len(raw) > MAX_ARCHIVE:
             raise CatalogError(f"{download}: archive too big")
-        raw = await resp.read()
         new_etag = resp.headers.get("ETag")
     apps = await hass.async_add_executor_job(
         parse_archive, raw, repository.kind, repository.id, raw_file_url(repository.url)

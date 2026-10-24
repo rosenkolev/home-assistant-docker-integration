@@ -43,6 +43,13 @@ PRUNE = {
 }
 
 
+def tag_filter(value) -> str:
+    """A tag filter: kept as text, refused when it isn't a valid regular expression."""
+    value = cv.string(value)
+    cv.is_regex(value)
+    return value
+
+
 def get_runtime(hass: HomeAssistant) -> tuple[DockerAppsConfigEntry, DockerAppsRuntime]:
     entries = hass.config_entries.async_loaded_entries(DOMAIN)
     if not entries:
@@ -78,10 +85,13 @@ def async_register_services(hass: HomeAssistant) -> None:
     prune_lock = asyncio.Lock()
 
     def writable_runtime() -> DockerAppsRuntime:
-        _, runtime = get_runtime(hass)
+        return writable()[1]
+
+    def writable() -> tuple[DockerAppsConfigEntry, DockerAppsRuntime]:
+        entry, runtime = get_runtime(hass)
         if runtime.read_only:
             raise ServiceValidationError("Docker Apps is in read-only mode")
-        return runtime
+        return entry, runtime
 
     async def logs(call: ServiceCall) -> ServiceResponse:
         _, runtime = get_runtime(hass)
@@ -176,13 +186,26 @@ def async_register_services(hass: HomeAssistant) -> None:
         )
         await runtime.docker.async_refresh()
 
+    async def set_volumes(call: ServiceCall) -> None:
+        runtime = writable_runtime()
+        app = get_app(runtime, call.data[ATTR_APP])
+        await _call(
+            runtime.manager.async_set_volumes(
+                app, call.data["service"], call.data["volumes"], runtime.docker.data
+            )
+        )
+        await runtime.docker.async_refresh()
+
     async def check_updates(call: ServiceCall) -> None:
         _, runtime = get_runtime(hass)
         await runtime.updates.async_check_now(refresh_catalog=call.data["repositories"])
 
     async def install(call: ServiceCall) -> ServiceResponse:
         runtime = writable_runtime()
-        store_app = runtime.catalog.get(call.data["store_app"])
+        try:
+            store_app = runtime.catalog.get(call.data["store_app"])
+        except CatalogError as err:
+            raise ServiceValidationError(str(err)) from err
         arch = runtime.docker.data.host.arch
         if not store_app.supports(arch):
             raise ServiceValidationError(f"{store_app.name} doesn't support {arch}")
@@ -211,7 +234,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         return {"app": key}
 
     async def uninstall(call: ServiceCall) -> None:
-        runtime = writable_runtime()
+        entry, runtime = writable()
         app = get_app(runtime, call.data[ATTR_APP])
         await _call(
             runtime.manager.async_uninstall(
@@ -219,9 +242,11 @@ def async_register_services(hass: HomeAssistant) -> None:
             )
         )
         await runtime.docker.async_refresh()
-        async_remove_stale_devices(hass, get_runtime(hass)[0])
+        async_remove_stale_devices(hass, entry)
 
-    hass.services.async_register(
+    # admin only too: logs can hold secrets
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "logs",
         logs,
@@ -245,8 +270,8 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("managed"): cv.boolean,
                 vol.Optional("launcher"): cv.boolean,
                 vol.Optional("services"): vol.All(cv.ensure_list, [cv.string]),
-                vol.Optional("include"): cv.string,
-                vol.Optional("exclude"): cv.string,
+                vol.Optional("include"): tag_filter,
+                vol.Optional("exclude"): tag_filter,
                 vol.Optional("upstream"): cv.string,
                 vol.Optional("allow_db_minor"): cv.boolean,
             },
@@ -281,6 +306,22 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_APP): cv.string,
                 vol.Required("service"): cv.string,
                 vol.Required("variables"): {cv.string: cv.string},
+            },
+        ),
+        "set_volumes": (
+            set_volumes,
+            {
+                vol.Required(ATTR_APP): cv.string,
+                vol.Required("service"): cv.string,
+                vol.Required("volumes"): [
+                    vol.Schema(
+                        {
+                            vol.Optional("source"): vol.Any(None, cv.string),
+                            vol.Required("target"): cv.string,
+                            vol.Optional("read_only", default=False): cv.boolean,
+                        }
+                    )
+                ],
             },
         ),
         "prune": (prune, {vol.Required("kind"): vol.In(list(PRUNE))}),

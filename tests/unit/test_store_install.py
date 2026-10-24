@@ -236,3 +236,103 @@ async def test__set_environment_keeps_the_change_in_the_override(manager, tmp_pa
     assert "SECRET" in environment["whoami"]  # the store's own variables stay
     container = next(iter(manager.client.containers.values()))
     assert "PASSWORD=pa$s" in container["Config"]["Env"]
+
+
+async def test__set_volumes_adds_and_removes_folders(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    app = data.apps["whoami"]
+    mounts = (await manager.async_volumes(app))["services"]["whoami"]
+    assert [(m["target"], m["yours"]) for m in mounts] == [("/data", False)]
+
+    # add a read-only folder: only the new one goes to the override
+    wanted = [*mounts, {"source": "/srv/media", "target": "/media", "read_only": True}]
+    await manager.async_set_volumes(app, "whoami", wanted, data)
+    override = (tmp_path / "apps" / "whoami" / "compose.override.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "- /srv/media:/media:ro" in override and "/data" not in override
+    binds = next(iter(manager.client.containers.values()))["HostConfig"]["Binds"]
+    assert "/srv/media:/media:ro" in binds and any(
+        b.endswith(":/data:rw") for b in binds
+    )
+    mounts = (await manager.async_volumes(app))["services"]["whoami"]
+    assert [(m["target"], m["yours"]) for m in mounts] == [
+        ("/data", False),
+        ("/media", True),
+    ]
+
+    # the app's own folder stays; a folder added by the user can go again
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match="come with the app"):
+        await manager.async_set_volumes(app, "whoami", [mounts[1]], data)
+    await manager.async_set_volumes(app, "whoami", [mounts[0]], data)
+    override = (tmp_path / "apps" / "whoami" / "compose.override.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "volumes" not in override
+    binds = next(iter(manager.client.containers.values()))["HostConfig"]["Binds"]
+    assert len(binds) == 1 and binds[0].endswith(":/data:rw")
+
+
+async def test__set_volumes_uses_docker_volumes_and_refuses_system_paths(
+    manager, tmp_path
+):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    app = data.apps["whoami"]
+    mounts = (await manager.async_volumes(app))["services"]["whoami"]
+
+    manager.client.volumes["immich_model-cache"] = {"Name": "immich_model-cache"}
+    with pytest.raises(AppError, match="can't be mounted"):
+        await manager.async_set_volumes(
+            app, "whoami", [*mounts, {"source": "/proc", "target": "/p"}], data
+        )
+    await manager.async_set_volumes(
+        app,
+        "whoami",
+        [*mounts, {"source": "immich_model-cache", "target": "/cache"}],
+        data,
+    )
+    override = (tmp_path / "apps" / "whoami" / "compose.override.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "immich_model-cache:" in override and "external: true" in override
+    binds = next(iter(manager.client.containers.values()))["HostConfig"]["Binds"]
+    assert "immich_model-cache:/cache:rw" in binds
+
+
+async def test__volume_suggestions_are_grouped_and_cached(manager):
+    manager.client.volumes["immich_model-cache"] = {
+        "Name": "immich_model-cache",
+        "Labels": {"com.docker.compose.project": "immich"},
+    }
+    manager.client.volumes["a" * 64] = {"Name": "a" * 64}
+    cid = manager.client.add_container(
+        "jellyfin", "jellyfin/jellyfin", project="jellyfin"
+    )
+    manager.client.containers[cid]["Mounts"] = [
+        {"Type": "bind", "Source": "/srv/media", "Destination": "/media", "RW": True},
+        {
+            "Type": "bind",
+            "Source": "/var/run/docker.sock",
+            "Destination": "/var/run/docker.sock",
+        },
+    ]
+    data = await manager.client.async_fetch()
+    calls = 0
+    volumes = manager.client.async_volumes
+
+    async def counted():
+        nonlocal calls
+        calls += 1
+        return await volumes()
+
+    manager.client.async_volumes = counted
+    first = await manager.async_volume_suggestions(data)
+    await manager.async_volume_suggestions(data)
+    assert calls == 1  # cached
+    assert first["volumes"] == [{"source": "immich_model-cache", "app": "immich"}]
+    assert first["apps"] == {"jellyfin": [{"source": "/srv/media", "target": "/media"}]}

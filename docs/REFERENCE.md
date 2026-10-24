@@ -6,6 +6,7 @@ Details for the [Docker Apps](../README.md) integration.
 1. [Entities](#entities)
 1. [Updates](#updates)
 1. [App stores](#app-stores)
+1. [App settings](#app-settings)
 1. [App launcher card](#app-launcher-card)
 1. [Actions](#actions)
 1. [Events](#events)
@@ -83,6 +84,17 @@ compose.override.yaml   # your changes (devices, extra volumes, ...), kept acros
 
 Store apps are managed: when the store publishes a new package, it shows in **Settings > Updates**.
 
+The install dialog checks the app's ports first. When the web port is taken, the next free one is filled in; a taken fixed port blocks the install. Apps that only work over HTTPS (linuxserver.io desktop images such as VS Code) open with `https://`. An install keeps running when the page is closed; the store shows it as **Installing…**, and a failed install leaves a notification.
+
+## App settings
+
+The app menu in the panel has two dialogs for apps with a `compose.override.yaml` (every store app):
+
+* **Settings & passwords:** the environment variables of each container, as compose resolves them. Passwords are hidden until you show them.
+* **Folders & volumes:** the folders and Docker volumes of each container. Add a host folder or a named volume, optionally read-only; suggestions list the folders of Home Assistant, the Docker volumes and the folders other apps use. The folders that come with the app are locked: removing them can lose the app's data.
+
+Saving writes only your changes to `compose.override.yaml` and recreates the changed containers. If the new containers can't be created, the file is put back and the app keeps running as before.
+
 ## App launcher card
 
 ```yaml
@@ -101,6 +113,8 @@ The card shows each app with **Show in app launcher** turned on (in the app menu
 | `docker_apps.logs` | Recent log lines of an app or a container (response) |
 | `docker_apps.manage` | Turn Managed or Show in app launcher on or off, choose tracked services, tag filters, upstream compose URL |
 | `docker_apps.update_services` | Update single services, also untracked ones |
+| `docker_apps.set_environment` | Change environment variables of one service (kept in `compose.override.yaml`) |
+| `docker_apps.set_volumes` | Set the folders and volumes of one service; the app's own ones must stay |
 | `docker_apps.recreate` | Bring an app up again from its compose files (optionally pull first) |
 | `docker_apps.container_start` / `_stop` / `_restart` | Control one container |
 | `docker_apps.prune` | Remove stopped containers, dangling or unused images, unused volumes, networks or build cache |

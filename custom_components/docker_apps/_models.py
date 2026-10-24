@@ -36,6 +36,8 @@ class ContainerInfo:
     tty: bool = False
     ports: list[str] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
+    # {type, source, name, target, read_only} of each mount
+    mounts: list[dict] = field(default_factory=list)
 
     @property
     def short_id(self) -> str:

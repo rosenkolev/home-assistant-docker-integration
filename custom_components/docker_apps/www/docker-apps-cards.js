@@ -19,7 +19,7 @@ const STYLE = `
   .app { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px 14px;
     border-radius: var(--ha-card-border-radius, 12px); background: var(--ha-card-background, var(--card-background-color));
     border: 1px solid var(--ha-card-border-color, var(--divider-color)); cursor: pointer; text-align: center;
-    min-width: 0; box-sizing: border-box; transition: box-shadow .15s; }
+    min-width: 0; box-sizing: border-box; transition: box-shadow .15s; font: inherit; color: inherit; text-decoration: none; }
   .app:hover { box-shadow: 0 2px 10px rgba(0,0,0,.12); }
   .app:focus-visible { outline: 2px solid var(--primary-color); }
   .bubble { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
@@ -41,19 +41,23 @@ function appInfo(hass, status) {
     name: hass.devices?.[device]?.name_by_user || hass.devices?.[device]?.name || key,
     picture,
     state: status.state,
-    url: port ? `${scheme || "http"}://${location.hostname}:${port}${path || "/"}` : null,
+    url: port ? `${scheme || "http"}://${location.hostname}:${port}${path}` : null,
   };
 }
 
+const STATE_CLASS = { stopped: "off", unhealthy: "bad" };
+
+// a link to the web UI; an app without one is a button that opens its more-info dialog
 function renderApp(app) {
   const icon = app.picture ? `<img src="${esc(app.picture)}" alt="">` : `<ha-icon icon="mdi:docker"></ha-icon>`;
-  const cls = app.state === "stopped" ? "off" : app.state === "unhealthy" ? "bad" : "";
   const status = STATUS[app.state];
-  return `<div class="app ${cls}" role="button" tabindex="0" data-id="${esc(app.id)}" title="${esc(app.url ? `Open ${app.name}` : app.name)}">
-      <div class="bubble">${icon}</div>
+  const body = `<div class="bubble">${icon}</div>
       <div class="name">${esc(app.name)}</div>
-      ${status ? `<div class="status">${esc(status)}</div>` : ""}
-    </div>`;
+      ${status ? `<div class="status">${esc(status)}</div>` : ""}`;
+  const cls = `app ${STATE_CLASS[app.state] || ""}`;
+  return app.url
+    ? `<a class="${cls}" href="${esc(app.url)}" target="_blank" rel="noopener" title="${esc(`Open ${app.name}`)}">${body}</a>`
+    : `<button class="${cls}" data-id="${esc(app.id)}" title="${esc(app.name)}">${body}</button>`;
 }
 
 class DockerAppsCard extends HTMLElement {
@@ -84,22 +88,16 @@ class DockerAppsCard extends HTMLElement {
   _render() {
     if (!this.shadowRoot) {
       this.attachShadow({ mode: "open" });
-      this.shadowRoot.addEventListener("click", (ev) => this._open(ev));
-      this.shadowRoot.addEventListener("keydown", (ev) => ev.key === "Enter" && this._open(ev));
+      this.shadowRoot.addEventListener("click", (ev) => this._moreInfo(ev));
     }
     const title = this._config.title ? `<div class="title">${esc(this._config.title)}</div>` : "";
     const body = this._apps.length ? `<div class="apps">${this._apps.map(renderApp).join("")}</div>` : `<div class="empty">No apps</div>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>${title}${body}`;
   }
 
-  _open(ev) {
-    const app = this._apps.find((a) => a.id === ev.target.closest(".app")?.dataset.id);
-    if (!app) return;
-    if (app.url) {
-      window.open(app.url, "_blank", "noopener");
-      return;
-    }
-    this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: app.id }, bubbles: true, composed: true }));
+  _moreInfo(ev) {
+    const entityId = ev.target.closest("button.app")?.dataset.id;
+    if (entityId) this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
   }
 
   getCardSize() {

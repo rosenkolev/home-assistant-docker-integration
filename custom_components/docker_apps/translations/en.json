@@ -202,7 +202,7 @@
         },
         "upstream": {
           "name": "Upstream compose URL",
-          "description": "URL of the compose file of each release, with {version} where the version goes. Services the new version needs are then updated with the app."
+          "description": "URL of the compose file of each release. Write the word version in curly braces where the release version goes. Services the new version needs are then updated with the app."
         },
         "allow_db_minor": {
           "name": "Allow database minor updates",
@@ -287,6 +287,24 @@
         "variables": {
           "name": "Variables",
           "description": "Variables to set, for example PASSWORD: my-secret."
+        }
+      }
+    },
+    "set_volumes": {
+      "name": "Set folders and volumes",
+      "description": "Set all folders and volumes mounted into an app service. Changes are kept in compose.override.yaml, and the app is recreated.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "service": {
+          "name": "Service",
+          "description": "Service name in the compose file."
+        },
+        "volumes": {
+          "name": "Volumes",
+          "description": "List of mounts: source (a folder on the host or a Docker volume name), target (the path in the app) and read_only."
         }
       }
     },

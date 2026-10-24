@@ -15,7 +15,7 @@ from ._docker_client import DockerError
 from .apps import AppError, AppUpdate
 from .const import DOMAIN
 from .coordinator import DockerAppsConfigEntry
-from .entity import AppEntity
+from .entity import AppEntity, app_unique_id
 
 PARALLEL_UPDATES = 1
 
@@ -37,7 +37,7 @@ async def async_setup_entry(
         async_add_entities(AppUpdateEntity(runtime.updates, entry, k) for k in new)
         registry = er.async_get(hass)
         for key in added - managed:
-            unique_id = f"{entry.entry_id}_{key}_update"
+            unique_id = app_unique_id(entry.entry_id, key, "update")
             if entity_id := registry.async_get_entity_id("update", DOMAIN, unique_id):
                 registry.async_remove(entity_id)
         added.intersection_update(managed)
@@ -46,6 +46,7 @@ async def async_setup_entry(
     sync()
     entry.async_on_unload(runtime.manager.add_listener(sync))
     entry.async_on_unload(runtime.docker.async_add_listener(sync))
+    runtime.app_removed.append(added.discard)
 
 
 class AppUpdateEntity(AppEntity, UpdateEntity):
@@ -132,8 +133,7 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
             ]
         untracked = [
             f"{s.service} ({s.current}{f', {s.latest} available' if s.has_update else ''})"
-            for s in update.services
-            if not s.tracked and not s.required
+            for s in update.kept
         ]
         if untracked:
             lines += ["", "Not tracked, kept as they are: " + ", ".join(untracked)]

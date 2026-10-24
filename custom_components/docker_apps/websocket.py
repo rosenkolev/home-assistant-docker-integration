@@ -19,7 +19,7 @@ from .apps import AppError
 from .catalog import CatalogError
 from .const import DOMAIN
 from .entity import app_identifier, app_web
-from .services import get_container, get_runtime
+from .services import MAX_TAIL, get_container, get_runtime
 
 
 @callback
@@ -30,6 +30,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_store_app,
         ws_store_ports,
         ws_app_environment,
+        ws_app_volumes,
         ws_resources,
         ws_logs_subscribe,
     ):
@@ -83,7 +84,7 @@ def ws_state(
         apps.append(
             {
                 "key": app.key,
-                "name": (settings.store or {}).get("name") or app.name,
+                "name": manager.display_name(app),
                 "icon": (settings.store or {}).get("icon"),
                 "compose": app.is_compose,
                 "editable": manager.can_edit(app),
@@ -91,8 +92,7 @@ def ws_state(
                 and manager.override_path(app) is not None,
                 "managed": settings.managed,
                 "launcher": manager.in_launcher(app.key),
-                "version": (settings.store or {}).get("version")
-                or next((c.image_version for c in data.app_containers(app.key)), None),
+                "version": manager.display_version(app, data),
                 "store": bool(settings.store),
                 "include": settings.include,
                 "exclude": settings.exclude,
@@ -129,8 +129,7 @@ def ws_state(
                                 "image": s.image,
                                 "latest": s.latest if s.has_update else None,
                             }
-                            for s in update.services
-                            if not s.tracked and not s.required
+                            for s in update.kept
                         ],
                     }
                     if update
@@ -174,9 +173,7 @@ def ws_store(
     catalog = runtime.catalog
     arch = runtime.docker.data.host.arch
     installed = {
-        f"{s.store['repo_id']}.{s.store['app_id']}": key
-        for key, s in runtime.manager.settings.items()
-        if s.store
+        s.store_app_id: key for key, s in runtime.manager.settings.items() if s.store
     }
     installing = {store_id: key for key, store_id in runtime.manager.installing.items()}
     connection.send_result(
@@ -277,6 +274,31 @@ async def ws_app_environment(
     connection.send_result(msg["id"], {"services": environment})
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/app/volumes", vol.Required("app"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_app_volumes(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Mounts of each service of an app, and folders and volumes to add."""
+    _, runtime = get_runtime(hass)
+    app = runtime.docker.data.apps.get(msg["app"])
+    if app is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "app not found")
+        return
+    try:
+        volumes = await runtime.manager.async_volumes(app)
+        suggestions = await runtime.manager.async_volume_suggestions(
+            runtime.docker.data
+        )
+    except (AppError, ComposeError, DockerError, OSError) as err:
+        connection.send_error(msg["id"], websocket_api.ERR_UNKNOWN_ERROR, str(err))
+        return
+    connection.send_result(msg["id"], {**volumes, "suggestions": suggestions})
+
+
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/resources"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -307,7 +329,9 @@ async def ws_resources(
             "images": [
                 {
                     "id": i["Id"],
-                    "tags": i.get("RepoTags") or [],
+                    # images pulled by digest have no tag: show their repository
+                    "tags": i.get("RepoTags")
+                    or sorted({d.split("@", 1)[0] for d in i.get("RepoDigests") or []}),
                     "size": i.get("Size", 0),
                     "created": i.get("Created"),
                     "in_use": i["Id"] in used_images,
@@ -324,7 +348,9 @@ async def ws_resources(
     {
         vol.Required("type"): f"{DOMAIN}/logs/subscribe",
         vol.Required("container"): str,
-        vol.Optional("tail", default=200): vol.All(int, vol.Range(0, 5000)),
+        vol.Optional("tail", default=200): vol.All(
+            vol.Coerce(int), vol.Range(0, MAX_TAIL)
+        ),
     }
 )
 @websocket_api.require_admin

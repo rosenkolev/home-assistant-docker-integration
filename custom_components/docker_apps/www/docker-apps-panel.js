@@ -5,6 +5,11 @@
 const DOMAIN = "docker_apps";
 const REFRESH_MS = 5000;
 const STORE_PAGE = 60;
+const PORT_CHECK_MS = 400; // typing pause before the web port is checked again
+const LOG_LINES_MAX = 5000; // above this the log view keeps only the newest lines
+const LOG_LINES_KEEP = 4000;
+// terminal color codes in logs; the log view shows plain text
+const ANSI_CODES = /\x1b\[[0-9;?]*[A-Za-z]/g;
 // tab -> URL hash, so a refresh opens the same tab
 const TABS = { apps: ["installed", "Installed"], store: ["app-store", "App store"], resources: ["images-volumes", "Images &amp; volumes"] };
 const tabFromHash = () => Object.keys(TABS).find((t) => `#${TABS[t][0]}` === location.hash) || "apps";
@@ -71,8 +76,17 @@ const markdown = (root, selector, text) => {
   }
 };
 
-const iconButton = (action, name, title, data = "", disabled = false) =>
-  `<button class="icon-btn" title="${esc(title)}" aria-label="${esc(title)}" data-action="${action}" ${data} ${disabled ? "disabled" : ""}>${icon(name)}</button>`;
+const iconButton = (action, name, title, { data = "", disabled = false, small = false } = {}) =>
+  `<button class="icon-btn ${small ? "small" : ""}" title="${esc(title)}" aria-label="${esc(title)}" data-action="${action}" ${data} ${disabled ? "disabled" : ""}>${icon(name)}</button>`;
+
+const tile = (value, label, accent = false) =>
+  `<div class="tile ${accent ? "accent" : ""}"><div class="value">${value}</div><div class="label">${label}</div></div>`;
+
+const reclaimable = (disk) => (disk?.images_reclaimable || 0) + (disk?.volumes_reclaimable || 0);
+
+// dialog footer: Cancel and one action button; `data-r` names the action
+const footer = (label, r = "yes", style = "primary", disabled = false) =>
+  `<button class="btn" data-r="no">Cancel</button><button class="btn ${style}" data-r="${r}" ${disabled ? "disabled" : ""}>${label}</button>`;
 
 const STYLE = `
   :host { display: block; background: var(--primary-background-color); color: var(--primary-text-color);
@@ -115,11 +129,11 @@ const STYLE = `
     background: var(--secondary-background-color); display: grid; place-items: center; color: var(--secondary-text-color); }
 
   .chip { font-size: 12px; padding: 3px 10px; border-radius: 12px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
-  .chip.ok { background: rgba(67,160,71,.14); color: var(--success-color, #43a047); }
-  .chip.warn, .chip.busy { background: rgba(255,152,0,.16); color: var(--warning-color, #ef8a00); }
-  .chip.bad { background: rgba(219,68,55,.14); color: var(--error-color, #db4437); }
+  .chip.ok { background: rgba(var(--rgb-success-color, 67,160,71), .14); color: var(--success-color, #43a047); }
+  .chip.warn, .chip.busy { background: rgba(var(--rgb-warning-color, 255,152,0), .16); color: var(--warning-color, #ef8a00); }
+  .chip.bad { background: rgba(var(--rgb-error-color, 219,68,55), .14); color: var(--error-color, #db4437); }
   .chip.off { background: var(--secondary-background-color); color: var(--secondary-text-color); }
-  .chip.info { background: rgba(3,169,244,.12); color: var(--primary-color); }
+  .chip.info { background: rgba(var(--rgb-primary-color, 3,169,244), .12); color: var(--primary-color); }
   button.chip { border: none; cursor: pointer; font: inherit; font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--secondary-text-color); }
   .dot.ok { background: var(--success-color, #43a047); }
@@ -132,12 +146,15 @@ const STYLE = `
   .metric ha-icon { --mdc-icon-size: 16px; color: var(--secondary-text-color); }
 
   .banner { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 12px; border-radius: 10px;
-    background: rgba(3,169,244,.10); }
+    background: rgba(var(--rgb-primary-color, 3,169,244), .10); }
   .banner ha-icon { color: var(--primary-color); }
-  .banner.hold { background: rgba(255,152,0,.12); }
+  .banner.hold { background: rgba(var(--rgb-warning-color, 255,152,0), .12); }
   .banner.hold ha-icon { color: var(--warning-color, #ef8a00); }
-  .banner.error { background: rgba(219,68,55,.10); }
+  .banner.error { background: rgba(var(--rgb-error-color, 219,68,55), .10); }
   .banner .title { font-weight: 500; font-size: 14px; }
+  .text { font-size: 14px; line-height: 1.5; }
+  .hint { margin-top: 12px; }
+  ul.list { margin: 0; padding-left: 20px; line-height: 1.8; font-size: 14px; }
 
   button.btn { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 8px; cursor: pointer; white-space: nowrap;
     border: 1px solid var(--divider-color); background: transparent; color: var(--primary-text-color); }
@@ -177,12 +194,13 @@ const STYLE = `
     background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 10px;
     box-shadow: 0 6px 24px rgba(0,0,0,.18); }
   .menu button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 16px; border: none; background: none;
-    font: inherit; font-size: 14px; color: inherit; cursor: pointer; text-align: left; }
+    font: inherit; font-size: 14px; color: inherit; cursor: pointer; text-align: left; white-space: nowrap; }
   .menu button:hover:not(:disabled) { background: var(--secondary-background-color); }
   .menu button ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
   .menu button.danger, .menu button.danger ha-icon { color: var(--error-color, #db4437); }
   progress { width: 100%; height: 4px; margin-top: 12px; accent-color: var(--primary-color); }
 
+  .card + .card { margin-top: 16px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--divider-color); vertical-align: middle; }
   th { color: var(--secondary-text-color); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -197,6 +215,27 @@ const STYLE = `
   dialog .head .name { font-size: 20px; }
   dialog .body { padding: 8px 20px 16px; max-height: 70vh; overflow: auto; }
   dialog .body li { overflow-wrap: anywhere; }
+  .mount { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center;
+    padding: 10px 0; border-top: 1px solid var(--divider-color); }
+  .mount ha-icon { color: var(--secondary-text-color); }
+  .mount .paths { min-width: 0; font-size: 13px; }
+  .mount .paths .mono { overflow-wrap: anywhere; }
+  .mount label.check { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: inherit; white-space: nowrap; }
+  .mount label.check input, .add label.check input { width: auto; }
+  .mount label.check:has(input:disabled) { color: var(--secondary-text-color); }
+  .add { display: grid; gap: 8px; margin-top: 4px; }
+  .add label.check { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 0; color: inherit; }
+  .combo { position: relative; }
+  /* inline, not floating: the dialog body scrolls and would cut a floating list */
+  .suggest { margin-top: 4px; max-height: 240px; overflow: auto;
+    background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 10px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.18); padding: 4px 0; }
+  .suggest .group { padding: 8px 12px 4px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--secondary-text-color); }
+  .suggest button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 6px 12px;
+    font: inherit; color: inherit; cursor: pointer; }
+  .suggest button:hover { background: var(--secondary-background-color); }
+  .suggest button .muted { display: block; font-size: 12px; }
   dialog .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 20px 18px; }
   dialog label { display: block; margin: 14px 0 6px; font-size: 13px; color: var(--secondary-text-color); }
   dialog input, dialog select { width: 100%; }
@@ -217,8 +256,10 @@ const STYLE = `
   pre.logs { margin: 0; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
     background: #121212; color: #ddd; padding: 12px; border-radius: 10px; min-height: 320px; max-height: 55vh; overflow: auto; }
   .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; margin-bottom: 12px; font-size: 14px;
-    background: rgba(255,152,0,.12); }
+    background: rgba(var(--rgb-warning-color, 255,152,0), .12); }
   .empty { padding: 48px 16px; text-align: center; color: var(--secondary-text-color); }
+  .empty.small { padding: 16px; }
+  .grid > .empty { grid-column: 1 / -1; }
   a { color: var(--primary-color); }
   @media (max-width: 600px) { main { padding: 12px; } .grid { grid-template-columns: 1fr; } header .host { display: none; } }
 `;
@@ -233,10 +274,12 @@ class DockerAppsPanel extends HTMLElement {
     this._state = null;
     this._store = null;
     this._resources = null;
-    this._open = new Set();
+    this._expandedApps = new Set();
     this._menu = null;
     this._error = null;
     this._shown = STORE_PAGE;
+    this._loadSeq = 0; // the newest _load wins; older answers are dropped
+    this._logGen = 0; // the newest log subscription wins
   }
 
   set hass(hass) {
@@ -245,6 +288,8 @@ class DockerAppsPanel extends HTMLElement {
     if (first) {
       this._renderShell();
       this._load();
+    } else {
+      this.shadowRoot.querySelector("ha-menu-button").hass = hass;
     }
   }
 
@@ -260,10 +305,16 @@ class DockerAppsPanel extends HTMLElement {
       const live = this._tab === "apps" || (this._tab === "store" && this._store?.apps.some((a) => a.installing));
       if (document.visibilityState === "visible" && live && !this._dialogOpen() && !this._menu) this._load();
     }, REFRESH_MS);
+    // on the document: a re-render moves the focus out of the panel
+    this._onKey = (ev) => {
+      if (ev.key === "Escape" && this._menu) this._closeMenu();
+    };
+    document.addEventListener("keydown", this._onKey);
   }
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    document.removeEventListener("keydown", this._onKey);
     this._stopLogs();
   }
 
@@ -277,10 +328,11 @@ class DockerAppsPanel extends HTMLElement {
 
   async _call(service, data, response = false) {
     try {
-      const result = await this._hass.callService(DOMAIN, service, data, undefined, true, response);
+      const result = await this._hass.callService(DOMAIN, service, data, undefined, false, response);
       return response ? result?.response : result;
     } catch (err) {
       this._toast(err.message || String(err));
+      err.notified = true;
       throw err;
     }
   }
@@ -289,19 +341,28 @@ class DockerAppsPanel extends HTMLElement {
     this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
   }
 
+  _showError(err) {
+    if (!err.notified) this._toast(err.message || String(err));
+  }
+
   async _load() {
+    const tab = this._tab;
+    const seq = ++this._loadSeq;
+    const extraView = { store: "store", resources: "resources" }[tab];
     try {
-      const needState = this._tab !== "store" || !this._state;
+      const needState = tab !== "store" || !this._state;
       const [state, extra] = await Promise.all([
         needState ? this._ws("state") : this._state,
-        this._tab === "store" ? this._ws("store") : this._tab === "resources" ? this._ws("resources") : null,
+        extraView ? this._ws(extraView) : null,
       ]);
+      if (seq !== this._loadSeq) return;
       this._state = state;
       if (state.now) clockOffset = new Date(state.now).getTime() - Date.now();
-      if (this._tab === "store") this._store = extra;
-      if (this._tab === "resources") this._resources = extra;
+      if (tab === "store") this._store = extra;
+      if (tab === "resources") this._resources = extra;
       this._error = null;
     } catch (err) {
+      if (seq !== this._loadSeq) return;
       this._error = err.message || String(err);
     }
     this._renderMain();
@@ -326,7 +387,16 @@ class DockerAppsPanel extends HTMLElement {
     const main = this.shadowRoot.querySelector("main");
     main.addEventListener("click", (ev) => this._onClick(ev));
     main.addEventListener("input", (ev) => this._onInput(ev));
-    main.addEventListener("change", (ev) => this._onInput(ev));
+    main.addEventListener("change", (ev) => this._onChange(ev));
+    // the app menu closes on a click anywhere else (and on Escape, see connectedCallback)
+    this.shadowRoot.addEventListener("click", (ev) => {
+      if (this._menu && !ev.target.closest(".menu, [data-action=menu]")) this._closeMenu();
+    });
+  }
+
+  _closeMenu() {
+    this._menu = null;
+    this._renderMain();
   }
 
   _setTab(tab) {
@@ -373,8 +443,6 @@ class DockerAppsPanel extends HTMLElement {
     const apps = state.apps.filter((a) => !filter || a.name.toLowerCase().includes(filter));
     const updates = state.apps.filter((a) => a.update?.available).length;
     const managed = state.apps.filter((a) => a.managed).length;
-    const tile = (value, label, accent = false) =>
-      `<div class="tile ${accent ? "accent" : ""}"><div class="value">${value}</div><div class="label">${label}</div></div>`;
     return `
       ${notices.map((n) => `<div class="notice">${icon("information-outline")}<div>${n}</div></div>`).join("")}
       <div class="tiles">
@@ -382,7 +450,7 @@ class DockerAppsPanel extends HTMLElement {
         ${tile(`${state.host.running}<span class="muted"> / ${state.host.containers}</span>`, "Containers running")}
         ${tile(managed, "Managed")}
         ${tile(updates, "Updates", updates > 0)}
-        ${tile(bytes((state.disk?.images_reclaimable || 0) + (state.disk?.volumes_reclaimable || 0)), "Reclaimable")}
+        ${tile(bytes(reclaimable(state.disk)), "Reclaimable")}
       </div>
       <div class="toolbar">
         <input id="filter" placeholder="Search apps" value="${esc(this._filter)}" data-input="filter">
@@ -401,9 +469,10 @@ class DockerAppsPanel extends HTMLElement {
     const data = `data-app="${k}"`;
     const isSelf = app.containers.some((c) => c.is_self);
     const version = update?.installed || app.version || "";
-    const appIcon = app.icon
-      ? `<img class="app-icon" src="${esc(app.icon)}" alt="">`
-      : `<div class="app-icon">${icon(isSelf ? "home-assistant" : app.compose ? "layers-outline" : "docker")}</div>`;
+    let iconName = "docker";
+    if (app.compose) iconName = "layers-outline";
+    if (isSelf) iconName = "home-assistant";
+    const appIcon = app.icon ? `<img class="app-icon" src="${esc(app.icon)}" alt="">` : `<div class="app-icon">${icon(iconName)}</div>`;
 
     let banner = "";
     if (update?.blocked) {
@@ -421,29 +490,31 @@ class DockerAppsPanel extends HTMLElement {
     const menuItems = [
       ["launcher", app.launcher ? "checkbox-marked-outline" : "checkbox-blank-outline", "Show in app launcher"],
       app.configurable ? ["environment", "cog-outline", "Settings & passwords…"] : null,
+      app.configurable ? ["volumes", "folder-multiple-outline", "Folders & volumes…"] : null,
       app.compose && app.editable ? ["recreate", "autorenew", "Recreate"] : null,
       app.history?.length && app.editable ? ["rollback", "history", "Roll back…"] : null,
       app.managed && !app.store ? ["settings", "tune-variant", "Update settings…"] : null,
       isSelf ? null : ["uninstall", "delete-outline", "Remove…", "danger"],
     ].filter(Boolean);
-    const running = cls !== "off";
-    const footer = `
+    const button = (action, name, title) => iconButton(action, name, title, { data, disabled: app.busy });
+    const power = cls === "off" ? button("start", "play", "Start") : button("stop", "stop", "Stop");
+    const actions = `
       <div class="section footer">
         ${readOnly || !app.compose ? `<span class="grow"></span>` : `<label class="toggle grow" title="Check for updates and allow one-click updates">
           <input type="checkbox" data-input="managed" ${data} ${app.managed ? "checked" : ""} ${app.editable || app.store ? "" : "disabled"}> Managed</label>`}
         ${app.web ? `<a class="icon-btn" href="${esc(webUrl(app.web))}" target="_blank" rel="noopener" title="Open web UI" aria-label="Open web UI">${icon("open-in-new")}</a>` : ""}
-        ${iconButton("logs", "text-box-outline", "Logs", data)}
-        ${readOnly ? "" : iconButton("restart", "restart", "Restart", data, app.busy)}
-        ${readOnly || isSelf ? "" : running ? iconButton("stop", "stop", "Stop", data, app.busy) : iconButton("start", "play", "Start", data, app.busy)}
+        ${iconButton("logs", "text-box-outline", "Logs", { data })}
+        ${readOnly ? "" : button("restart", "restart", "Restart")}
+        ${readOnly || isSelf ? "" : power}
         ${readOnly || !menuItems.length ? "" : `<div class="menu-wrap">
-          ${iconButton("menu", "dots-vertical", "More", data)}
+          ${iconButton("menu", "dots-vertical", "More", { data })}
           ${this._menu === app.key ? `<div class="menu">${menuItems
             .map(([action, name, text, style]) => `<button class="${style || ""}" data-action="${action}" ${data}>${icon(name)}${text}</button>`)
             .join("")}</div>` : ""}
         </div>`}
       </div>`;
 
-    const open = this._open.has(app.key);
+    const open = this._expandedApps.has(app.key);
     return `
       <div class="card">
         <div class="section">
@@ -469,7 +540,7 @@ class DockerAppsPanel extends HTMLElement {
           </button>
           ${open ? app.containers.map((c) => this._renderContainer(app, c, readOnly)).join("") : ""}
         </div>
-        ${footer}
+        ${actions}
       </div>`;
   }
 
@@ -485,8 +556,11 @@ class DockerAppsPanel extends HTMLElement {
       ? `<span class="chip ${c.required ? "warn" : "info"}">${icon("arrow-up")}${esc(c.latest)}${c.required ? " required" : ""}</span>`
       : "";
     const updateOne = c.latest && !c.tracked && !readOnly && app.editable
-      ? iconButton("update-service", "arrow-up-bold-circle-outline", `Update ${c.service} to ${c.latest}`, `data-app="${esc(app.key)}" data-service="${esc(c.service)}" data-tag="${esc(c.latest)}"`)
+      ? iconButton("update-service", "arrow-up-bold-circle-outline", `Update ${c.service} to ${c.latest}`, {
+          data: `data-app="${esc(app.key)}" data-service="${esc(c.service)}" data-tag="${esc(c.latest)}"`,
+        })
       : "";
+    const containerData = `data-container="${esc(c.key)}"`;
     return `
       <div class="container">
         <span class="dot ${cls}" title="${esc(label)}"></span>
@@ -503,8 +577,8 @@ class DockerAppsPanel extends HTMLElement {
         </div>
         <div class="tools">
           ${updateOne}
-          ${iconButton("container-logs", "text-box-outline", "Logs", `data-container="${esc(c.key)}"`).replace("icon-btn", "icon-btn small")}
-          ${readOnly || c.is_self ? "" : iconButton("container-restart", "restart", "Restart", `data-container="${esc(c.key)}"`).replace("icon-btn", "icon-btn small")}
+          ${iconButton("container-logs", "text-box-outline", "Logs", { data: containerData, small: true })}
+          ${readOnly || c.is_self ? "" : iconButton("container-restart", "restart", "Restart", { data: containerData, small: true })}
         </div>
       </div>`;
   }
@@ -552,7 +626,7 @@ class DockerAppsPanel extends HTMLElement {
           <div class="muted ellipsis">${esc(app.version)} · ${esc(repo?.name || "")}</div></div>
           ${action}
         </div>
-        <div class="muted" style="margin-top:10px">${esc(app.tagline)}</div>
+        <div class="muted hint">${esc(app.tagline)}</div>
       </div></div>`;
   }
 
@@ -569,14 +643,14 @@ class DockerAppsPanel extends HTMLElement {
         ? ""
         : `<button class="btn" data-action="prune" data-kind="${kind}" ${this._pruning ? "disabled" : ""}>${this._pruning === kind ? "Removing…" : text}</button>`;
     const table = (title, headers, rows) => `
-      <div class="card" style="margin-bottom:16px"><div class="section"><div class="name">${title}</div></div>
+      <div class="card"><div class="section"><div class="name">${title}</div></div>
         <div class="scroll"><table><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>${rows}</table></div></div>`;
     return `
       <div class="tiles">
-        <div class="tile"><div class="value">${bytes(disk?.images_size)}</div><div class="label">Images · ${disk?.images_unused ?? "–"} unused</div></div>
-        <div class="tile"><div class="value">${bytes(disk?.volumes_size)}</div><div class="label">Volumes · ${disk?.volumes_unused ?? "–"} unused</div></div>
-        <div class="tile"><div class="value">${bytes(disk?.build_cache_size)}</div><div class="label">Build cache</div></div>
-        <div class="tile accent"><div class="value">${bytes((disk?.images_reclaimable || 0) + (disk?.volumes_reclaimable || 0))}</div><div class="label">Reclaimable</div></div>
+        ${tile(bytes(disk?.images_size), `Images · ${disk?.images_unused ?? "–"} unused`)}
+        ${tile(bytes(disk?.volumes_size), `Volumes · ${disk?.volumes_unused ?? "–"} unused`)}
+        ${tile(bytes(disk?.build_cache_size), "Build cache")}
+        ${tile(bytes(reclaimable(disk)), "Reclaimable", true)}
       </div>
       <div class="toolbar">
         ${prune("containers", "Remove stopped containers")}
@@ -603,16 +677,19 @@ class DockerAppsPanel extends HTMLElement {
   // --- events ---
 
   _onInput(ev) {
-    const { input, app } = ev.target.dataset || {};
-    if (input === "filter") {
-      this._filter = ev.target.value;
-      this._shown = STORE_PAGE;
-      this._renderMain();
-    } else if (input === "category") {
+    if (ev.target.dataset.input !== "filter") return;
+    this._filter = ev.target.value;
+    this._shown = STORE_PAGE;
+    this._renderMain();
+  }
+
+  _onChange(ev) {
+    const { input, app } = ev.target.dataset;
+    if (input === "category") {
       this._category = ev.target.value;
       this._shown = STORE_PAGE;
       this._renderMain();
-    } else if (input === "managed" && ev.type === "change") {
+    } else if (input === "managed") {
       const managed = ev.target.checked;
       this._call("manage", { app, managed })
         .then(() => this._toast(managed ? "Managed: checking for updates…" : "Not managed anymore"))
@@ -623,17 +700,11 @@ class DockerAppsPanel extends HTMLElement {
 
   async _onClick(ev) {
     const button = ev.target.closest("[data-action]");
-    if (!button || button.disabled) {
-      if (this._menu && !ev.target.closest(".menu")) {
-        this._menu = null;
-        this._renderMain();
-      }
-      return;
-    }
+    if (!button || button.disabled) return;
     const { action, app, container, kind, store, service, tag } = button.dataset;
     const appInfo = this._state?.apps.find((a) => a.key === app);
     if (action === "toggle") {
-      this._open.has(app) ? this._open.delete(app) : this._open.add(app);
+      if (!this._expandedApps.delete(app)) this._expandedApps.add(app);
       this._renderMain();
       return;
     }
@@ -647,10 +718,10 @@ class DockerAppsPanel extends HTMLElement {
       this._renderMain();
       return;
     }
-    if (this._menu) {
-      this._menu = null;
-      this._renderMain();
-    }
+    if (this._menu) this._closeMenu();
+    // one action at a time: a second click while a dialog loads would open it twice
+    if (this._acting) return;
+    this._acting = true;
     try {
       switch (action) {
         case "check-updates":
@@ -681,17 +752,16 @@ class DockerAppsPanel extends HTMLElement {
           }
           break;
         case "uninstall": {
-          const answer = await this._confirm(
+          const dialog = this._dialog(
             `Remove ${appInfo.name}?`,
-            appInfo.store
-              ? `<div>The containers and networks of the app are removed.</div>
-                 <label class="toggle"><input type="checkbox" id="remove-data"> Also delete the app folder and its data</label>`
-              : `<div>The containers and networks of the app are removed.</div>
-                 <div class="muted" style="margin-top:8px">The compose files and volumes stay, so it can be started again with <code>docker compose up -d</code>.</div>`,
-            "Remove",
-            "danger",
+            `<div class="text">The containers and networks of the app are removed.</div>
+             ${appInfo.store
+               ? `<label class="toggle"><input type="checkbox" id="remove-data"> Also delete the app folder and its data</label>`
+               : `<div class="muted hint">The compose files and volumes stay, so it can be started again with <code>docker compose up -d</code>.</div>`}`,
+            footer("Remove", "yes", "primary danger"),
           );
-          if (answer) await this._call("uninstall", { app, remove_data: answer === "checked" });
+          const answer = await this._ask(dialog, () => ({ remove_data: Boolean(dialog.querySelector("#remove-data")?.checked) }));
+          if (answer) await this._call("uninstall", { app, ...answer });
           break;
         }
         case "logs":
@@ -708,6 +778,9 @@ class DockerAppsPanel extends HTMLElement {
           break;
         case "environment":
           await this._environment(appInfo);
+          break;
+        case "volumes":
+          await this._volumes(appInfo);
           break;
         case "launcher":
           await this._call("manage", { app, launcher: !appInfo.launcher });
@@ -726,7 +799,7 @@ class DockerAppsPanel extends HTMLElement {
           }
           break;
         case "prune":
-          if (await this._confirm("Remove unused resources?", `${esc(button.textContent)}. This can't be undone.`, "Remove", "danger")) {
+          if (await this._confirm("Remove unused resources?", `${esc(button.textContent)}. This can't be undone.`, "Remove", "primary danger")) {
             this._pruning = kind;
             this._renderMain();
             try {
@@ -744,24 +817,36 @@ class DockerAppsPanel extends HTMLElement {
           break;
       }
     } catch (err) {
-      // already shown as a notification
+      this._showError(err);
+    } finally {
+      this._acting = false;
     }
     this._load();
   }
 
   async _callEntity(domain, service, app, extra = {}) {
-    const entities = await this._hass.callWS({ type: "config/entity_registry/list_for_display" });
-    const entity = entities.entities.find((e) => e.di === app.device_id && e.ei.startsWith(`${domain}.`));
-    if (!entity) throw new Error("Update entity not found");
-    await this._hass.callService(domain, service, { entity_id: entity.ei, ...extra });
+    const entity = Object.values(this._hass.entities).find(
+      (e) => e.device_id === app.device_id && e.entity_id.startsWith(`${domain}.`),
+    );
+    if (!entity) throw new Error(`${domain} entity of ${app.name} not found`);
+    await this._hass.callService(domain, service, { entity_id: entity.entity_id, ...extra }, undefined, false);
   }
 
   // --- dialogs ---
 
+  // One dialog element is reused. Buttons carry `data-r`: close and no close the
+  // dialog, every other value goes to this._dialogAction(r, button).
   _dialog(title, body, buttons, wide = false) {
     const dialog = this.shadowRoot.getElementById("dialog");
-    // one dialog element is reused: drop the handlers of the previous dialog
-    dialog.onclick = dialog.oninput = dialog.oncancel = dialog.onclose = null;
+    dialog.oninput = dialog.onchange = dialog.onclose = null;
+    this._dialogAction = null;
+    dialog.onclick = (ev) => {
+      const button = ev.target.closest("[data-r]");
+      const r = button?.dataset.r;
+      if (!r) return;
+      if (r === "close" || r === "no") dialog.close();
+      else this._dialogAction?.(r, button);
+    };
     dialog.className = wide ? "wide" : "";
     dialog.innerHTML = `<div class="head"><div class="name grow">${esc(title)}</div>
         <button class="icon-btn" data-r="close" aria-label="Close">${icon("close")}</button></div>
@@ -771,26 +856,41 @@ class DockerAppsPanel extends HTMLElement {
     return dialog;
   }
 
+  // resolves with onYes() on the yes button, null when the dialog is closed otherwise
   _ask(dialog, onYes) {
     return new Promise((resolve) => {
-      dialog.onclick = (ev) => {
-        const r = ev.target.closest("[data-r]")?.dataset.r;
-        if (!r) return;
-        const value = r === "yes" ? onYes() : null;
+      this._dialogAction = (r) => {
+        if (r !== "yes") return;
+        resolve(onYes());
         dialog.close();
-        resolve(value);
       };
-      dialog.oncancel = () => resolve(null);
+      dialog.onclose = () => resolve(null);
     });
   }
 
+  // runs work with the dialog fields locked; the dialog closes on success and
+  // stays open (fields unlocked) when the work fails
+  async _save(dialog, button, label, work) {
+    // fields disabled before stay disabled afterwards
+    const fields = [...dialog.querySelectorAll("input, select, button")].filter((field) => !field.disabled);
+    const text = button.textContent;
+    fields.forEach((field) => (field.disabled = true));
+    button.textContent = label;
+    try {
+      await work();
+      dialog.close();
+      return true;
+    } catch (err) {
+      this._showError(err);
+      fields.forEach((field) => (field.disabled = false));
+      button.textContent = text;
+      return false;
+    }
+  }
+
   _confirm(title, body, label, style = "primary") {
-    const dialog = this._dialog(
-      title,
-      `<div style="font-size:14px;line-height:1.5">${body}</div>`,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn ${style === "danger" ? "primary danger" : "primary"}" data-r="yes">${esc(label)}</button>`,
-    );
-    return this._ask(dialog, () => (dialog.querySelector("#remove-data")?.checked ? "checked" : true));
+    const dialog = this._dialog(title, `<div class="text">${body}</div>`, footer(esc(label), "yes", style));
+    return this._ask(dialog, () => true);
   }
 
   _confirmUpdate(app) {
@@ -809,7 +909,7 @@ class DockerAppsPanel extends HTMLElement {
       ${update.store && update.release_notes ? `<h3>Release notes</h3><div class="md" id="release-notes"></div>` : ""}
       ${changes ? `<h3>What changes</h3><div class="scroll"><table><tr><th>Service</th><th>Now</th><th></th><th>New</th></tr>${changes}</table></div>` : ""}
       ${update.store && !changes ? `<h3>What changes</h3><div class="muted">The app's compose file is replaced with the new package. Your <code>compose.override.yaml</code> and settings stay.</div>` : ""}
-      ${kept ? `<h3>Stays as it is</h3><ul style="margin:0;padding-left:20px;line-height:1.8;font-size:14px">${kept}</ul>` : ""}
+      ${kept ? `<h3>Stays as it is</h3><ul class="list">${kept}</ul>` : ""}
       <h3>What happens</h3>
       <ol class="steps">
         <li>The compose files and <code>.env</code> are backed up for rollback.</li>
@@ -818,11 +918,7 @@ class DockerAppsPanel extends HTMLElement {
           ? "<li>Home Assistant restarts on the new version; this page reconnects in about a minute.</li>"
           : "<li>Only changed containers are recreated.</li><li>All containers must become healthy within 5 minutes, otherwise the backup is restored automatically.</li>"}
       </ol>`;
-    const dialog = this._dialog(
-      `Update ${app.name}`,
-      body,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="yes">${icon("arrow-up")} Update</button>`,
-    );
+    const dialog = this._dialog(`Update ${app.name}`, body, footer(`${icon("arrow-up")} Update`));
     markdown(dialog, "#release-notes", update.release_notes);
     return this._ask(dialog, () => true);
   }
@@ -831,7 +927,7 @@ class DockerAppsPanel extends HTMLElement {
     const dialog = this._dialog(
       title,
       `<div class="muted">${esc(text)}</div><label>Version</label><select id="pick">${options.map((o) => `<option>${esc(o)}</option>`).join("")}</select>`,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="yes">Roll back</button>`,
+      footer("Roll back"),
     );
     return this._ask(dialog, () => dialog.querySelector("#pick").value);
   }
@@ -841,12 +937,12 @@ class DockerAppsPanel extends HTMLElement {
       `Update settings · ${app.name}`,
       `<label>Upstream compose URL (optional)</label>
        <input id="upstream" placeholder="https://github.com/org/app/releases/download/{version}/docker-compose.yml" value="${esc(app.upstream || "")}">
-       <div class="muted" style="margin-top:6px">With <code>{version}</code>. Services the new version needs (for example a newer cache) are then updated with the app.
+       <div class="muted hint">With <code>{version}</code>. Services the new version needs (for example a newer cache) are then updated with the app.
          A new database major version puts the update on hold.</div>
-       <label class="toggle" style="margin-top:16px"><input type="checkbox" id="db-minor" ${app.allow_db_minor ? "checked" : ""}> Allow database minor updates</label>
+       <label class="toggle"><input type="checkbox" id="db-minor" ${app.allow_db_minor ? "checked" : ""}> Allow database minor updates</label>
        <label>Only tags matching (regular expression)</label><input id="include" class="mono" value="${esc(app.include || "")}">
        <label>Ignore tags matching (regular expression)</label><input id="exclude" class="mono" value="${esc(app.exclude || "")}">`,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="yes">Save</button>`,
+      footer("Save"),
     );
     const values = await this._ask(dialog, () => ({
       upstream: dialog.querySelector("#upstream").value,
@@ -877,17 +973,14 @@ class DockerAppsPanel extends HTMLElement {
       `Settings · ${app.name}`,
       `<div class="muted">Changes are kept in <code>compose.override.yaml</code>, so they stay after updates. Saving recreates the changed containers.</div>
        ${sections || `<div class="empty">This app has no environment variables.</div>`}`,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="save" ${sections ? "" : "disabled"}>Save</button>`,
+      footer("Save", "save", "primary", !sections),
     );
-    dialog.onclick = async (ev) => {
-      const button = ev.target.closest("[data-r]");
-      const r = button?.dataset.r;
+    this._dialogAction = async (r, button) => {
       if (r === "reveal") {
         const input = button.parentElement.querySelector("input");
         input.type = input.type === "password" ? "text" : "password";
         return;
       }
-      if (r === "no" || r === "close") dialog.close();
       if (r !== "save") return;
       const changes = {};
       dialog.querySelectorAll("input[data-key]").forEach((input) => {
@@ -899,19 +992,172 @@ class DockerAppsPanel extends HTMLElement {
         dialog.close();
         return;
       }
-      const fields = [...dialog.querySelectorAll("input, button")];
-      fields.forEach((field) => (field.disabled = true));
-      button.textContent = "Saving…";
-      try {
+      const saved = await this._save(dialog, button, "Saving…", async () => {
         for (const [service, variables] of Object.entries(changes)) {
           await this._call("set_environment", { app: app.key, service, variables });
         }
-        dialog.close();
-        this._toast(`${app.name} settings saved`);
-      } catch (err) {
-        fields.forEach((field) => (field.disabled = false));
-        button.textContent = "Save";
+      });
+      if (saved) this._toast(`${app.name} settings saved`);
+      this._load();
+    };
+  }
+
+  async _volumes(app) {
+    const info = await this._ws("app/volumes", { app: app.key });
+    const names = Object.keys(info.services);
+    const rows = Object.fromEntries(names.map((name) => [name, info.services[name].map((m) => ({ ...m }))]));
+    const original = JSON.stringify(rows);
+    const haConfig = info.suggestions.home_assistant.find((m) => m.target === "/config")?.source;
+    let service = names[0];
+    // grouped suggestions for the "Folder or volume" field
+    const groups = [
+      ["Home Assistant", info.suggestions.home_assistant.map((m) => ({ source: m.source, note: `Home Assistant ${m.target}` }))],
+      ["Docker volumes", info.suggestions.volumes.map((v) => ({ source: v.source, note: v.app ? `volume of ${v.app}` : "volume" }))],
+      ...Object.entries(info.suggestions.apps)
+        .filter(([key]) => key !== app.key)
+        .map(([key, mounts]) => [`Used by ${key}`, mounts.map((m) => ({ source: m.source, note: `as ${m.target}` }))]),
+    ].filter(([, items]) => items.length);
+    const mountIcon = (m) => {
+      if (!m.source) return "help-circle-outline";
+      return m.source.startsWith("/") ? "folder-outline" : "database-outline";
+    };
+
+    const dialog = this._dialog(
+      `Folders & volumes · ${app.name}`,
+      `<div class="muted">Folders on the NAS and Docker volumes the app can use. Changes are kept in <code>compose.override.yaml</code>, so they stay after updates. Saving recreates the app.</div>
+       ${names.length > 1 ? `<label>Container</label><select id="service">${names.map((n) => `<option>${esc(n)}</option>`).join("")}</select>` : ""}
+       <div id="mounts"></div>
+       <div id="mount-notes"></div>
+       <h3>Add a folder or volume</h3>
+       <div class="add">
+         <div class="combo"><input id="source" class="mono" placeholder="Folder on the NAS or Docker volume, e.g. /mnt/nas/media" autocomplete="off"><div class="suggest" hidden></div></div>
+         <input id="target" class="mono" placeholder="Path in the app, e.g. /media">
+         <div class="row"><label class="check grow"><input type="checkbox" id="read-only"> Read-only</label>
+           <button class="btn" data-r="add">${icon("plus")} Add</button></div>
+       </div>`,
+      footer("Save", "save"),
+      true,
+    );
+    const $ = (selector) => dialog.querySelector(selector);
+    const suggest = $(".suggest");
+
+    const render = () => {
+      const list = rows[service];
+      $("#mounts").innerHTML = list.length
+        ? list
+            .map(
+              (m, index) => `<div class="mount">
+                ${icon(mountIcon(m))}
+                <div class="paths"><div class="mono">${esc(m.source || "(anonymous volume)")}</div>
+                  <div class="muted">in the app: <span class="mono">${esc(m.target)}</span>${m.yours === false ? ` · <span title="Comes with the app">from app</span>` : ""}</div></div>
+                <label class="check" ${m.added ? "" : `title="Remove and add the folder again to change this"`}><input type="checkbox" data-index="${index}"
+                  ${m.read_only ? "checked" : ""} ${m.added ? "" : "disabled"}> Read-only</label>
+                ${m.yours === false
+                  ? `<span class="icon-btn small" title="Comes with the app, so it stays">${icon("lock-outline")}</span>`
+                  : `<button class="icon-btn small" data-r="remove" data-index="${index}" title="Remove" aria-label="Remove">${icon("delete-outline")}</button>`}
+              </div>`,
+            )
+            .join("")
+        : `<div class="empty small">No folders or volumes.</div>`;
+      const seesConfig = haConfig && list.some((m) => m.source && (m.source === haConfig || m.source.startsWith(`${haConfig}/`)));
+      $("#mount-notes").innerHTML = seesConfig
+        ? `<div class="banner hold">${icon("alert-outline")}<div class="grow text">The app can read and change your Home Assistant configuration, including <code>secrets.yaml</code>.</div></div>`
+        : "";
+    };
+
+    const defaultTarget = (source) => {
+      const name = source.replace(/\/+$/, "").split("/").pop() || "data";
+      const base = info.workspaces[service] || "/mnt";
+      return `${base.replace(/\/+$/, "")}/${name}`;
+    };
+
+    const showSuggestions = () => {
+      const query = $("#source").value.toLowerCase();
+      const html = groups
+        .map(([title, items]) => {
+          const matches = items.filter((i) => !query || i.source.toLowerCase().includes(query) || i.note.toLowerCase().includes(query));
+          return matches.length
+            ? `<div class="group">${esc(title)}</div>${matches
+                .map((i) => `<button type="button" data-pick="${esc(i.source)}"><span class="mono">${esc(i.source)}</span><span class="muted">${esc(i.note)}</span></button>`)
+                .join("")}`
+            : "";
+        })
+        .join("");
+      suggest.innerHTML = html;
+      suggest.hidden = !html;
+      if (html) suggest.scrollIntoView({ block: "nearest" });
+    };
+
+    const addProblem = (source, target) => {
+      if (!source) return "Choose a folder or a volume.";
+      if (!target.startsWith("/") || target === "/") return "The path in the app must start with / and can't be / itself.";
+      if (rows[service].some((m) => m.target === target)) return `${target} is already used in this app.`;
+      return "";
+    };
+
+    $("#source").addEventListener("focus", showSuggestions);
+    $("#source").addEventListener("input", showSuggestions);
+    $("#source").addEventListener("blur", () => (suggest.hidden = true));
+    $("#source").addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && !suggest.hidden) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        suggest.hidden = true;
       }
+    });
+    // mousedown keeps the focus in the field while a suggestion is picked
+    suggest.addEventListener("mousedown", (ev) => {
+      const pick = ev.target.closest("[data-pick]");
+      if (!pick) return;
+      ev.preventDefault();
+      $("#source").value = pick.dataset.pick;
+      if (!$("#target").value) $("#target").value = defaultTarget(pick.dataset.pick);
+      suggest.hidden = true;
+    });
+    dialog.onchange = (ev) => {
+      const { id, dataset } = ev.target;
+      if (id === "service") {
+        service = ev.target.value;
+        render();
+      } else if (dataset.index !== undefined) {
+        rows[service][Number(dataset.index)].read_only = ev.target.checked;
+      }
+    };
+
+    render();
+    this._dialogAction = async (r, button) => {
+      if (r === "remove") {
+        rows[service].splice(Number(button.dataset.index), 1);
+        render();
+      }
+      if (r === "add") {
+        const source = $("#source").value.trim();
+        const target = $("#target").value.trim() || (source ? defaultTarget(source) : "");
+        const problem = addProblem(source, target);
+        if (problem) {
+          this._toast(problem);
+          return;
+        }
+        rows[service].push({ source, target, read_only: $("#read-only").checked, yours: true, added: true });
+        $("#source").value = "";
+        $("#target").value = "";
+        $("#read-only").checked = false;
+        render();
+      }
+      if (r !== "save") return;
+      const before = JSON.parse(original);
+      const changed = names.filter((name) => JSON.stringify(rows[name]) !== JSON.stringify(before[name]));
+      if (!changed.length) {
+        dialog.close();
+        return;
+      }
+      const saved = await this._save(dialog, button, "Saving…", async () => {
+        for (const name of changed) {
+          const volumes = rows[name].map(({ source, target, read_only }) => ({ source, target, read_only }));
+          await this._call("set_volumes", { app: app.key, service: name, volumes });
+        }
+      });
+      if (saved) this._toast(`${app.name} folders saved`);
       this._load();
     };
   }
@@ -932,14 +1178,14 @@ class DockerAppsPanel extends HTMLElement {
     const dialog = this._dialog(
       `Install ${app.name}`,
       `<div class="md" id="description"></div>
-       <h3>Containers</h3><ul style="margin:0;padding-left:20px;line-height:1.8;font-size:14px">${services}</ul>
+       <h3>Containers</h3><ul class="list">${services}</ul>
        <label>Name (compose project)</label><input id="app-name" value="${esc(app.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"))}">
        ${app.web_port ? `<label>Web port</label><input data-var="APP_PORT" type="number" value="${esc(app.ports.web_port || app.web_port)}">` : ""}
        <div id="ports"></div>
        ${fields}
-       ${app.variables.some((v) => v.type === "random") ? `<div class="muted" style="margin-top:12px">Passwords and secrets are generated.</div>` : ""}
-       <div class="muted" style="margin-top:12px">Files go to <code>${esc(this._state.apps_root)}/&lt;name&gt;</code>, data to <code>${esc(this._state.data_root)}/&lt;name&gt;</code>.</div>`,
-      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="install">Install</button>`,
+       ${app.variables.some((v) => v.type === "random") ? `<div class="muted hint">Passwords and secrets are generated.</div>` : ""}
+       <div class="muted hint">Files go to <code>${esc(this._state.apps_root)}/&lt;name&gt;</code>, data to <code>${esc(this._state.data_root)}/&lt;name&gt;</code>.</div>`,
+      footer("Install", "install"),
     );
     markdown(dialog, "#description", app.description || app.tagline);
     const installButton = dialog.querySelector("[data-r=install]");
@@ -962,30 +1208,37 @@ class DockerAppsPanel extends HTMLElement {
         blocked = true;
       }
       dialog.querySelector("#ports").innerHTML = notes
-        .map(([cls, text]) => `<div class="banner ${cls === "bad" ? "error" : ""}">${icon(cls === "bad" ? "alert-circle-outline" : "information-outline")}<div class="grow" style="font-size:14px">${text}</div></div>`)
+        .map(([cls, text]) => `<div class="banner ${cls === "bad" ? "error" : ""}">${icon(cls === "bad" ? "alert-circle-outline" : "information-outline")}<div class="grow text">${text}</div></div>`)
         .join("");
       installButton.disabled = blocked;
     };
     showPorts(app.ports, true);
     let portTimer;
+    let portCheck = 0; // only the newest port check may change the notes
     dialog.oninput = (ev) => {
       ev.target.classList.remove("invalid");
       if (ev.target.dataset.var !== "APP_PORT") return;
       clearTimeout(portTimer);
       const port = Number(ev.target.value);
       if (!port) return;
-      portTimer = setTimeout(async () => showPorts(await this._ws("store/ports", { app_id: storeId, web_port: port })), 400);
+      portTimer = setTimeout(async () => {
+        const check = ++portCheck;
+        try {
+          const ports = await this._ws("store/ports", { app_id: storeId, web_port: port });
+          if (check === portCheck && dialog.open) showPorts(ports);
+        } catch (err) {
+          this._showError(err);
+        }
+      }, PORT_CHECK_MS);
     };
-    dialog.onclick = async (ev) => {
-      const use = ev.target.closest("[data-r=use-port]");
-      if (use) {
+    dialog.onclose = () => clearTimeout(portTimer);
+    this._dialogAction = async (r, button) => {
+      if (r === "use-port") {
         const input = dialog.querySelector("[data-var=APP_PORT]");
-        input.value = use.dataset.port;
+        input.value = button.dataset.port;
         input.dispatchEvent(new Event("input", { bubbles: true }));
         return;
       }
-      const r = ev.target.closest("[data-r]")?.dataset.r;
-      if (r === "no" || r === "close") dialog.close();
       if (r !== "install") return;
       const missing = [...dialog.querySelectorAll("input[required]")].filter((i) => !i.value.trim());
       missing.forEach((i) => i.classList.add("invalid"));
@@ -998,18 +1251,13 @@ class DockerAppsPanel extends HTMLElement {
         if (i.type === "checkbox") values[i.dataset.var] = String(i.checked);
         else if (i.value !== "") values[i.dataset.var] = i.value;
       });
-      const button = ev.target.closest("button");
-      const fields = [...dialog.querySelectorAll("input, select, button")];
-      fields.forEach((field) => (field.disabled = true));
-      button.textContent = "Installing…";
-      try {
-        await this._call("install", { store_app: storeId, name: dialog.querySelector("#app-name").value, values }, true);
-        dialog.close();
+      const name = dialog.querySelector("#app-name").value;
+      const installed = await this._save(dialog, button, "Installing…", () =>
+        this._call("install", { store_app: storeId, name, values }, true),
+      );
+      if (installed) {
         this._toast(`${app.name} installed`);
         this._setTab("apps");
-      } catch (err) {
-        fields.forEach((field) => (field.disabled = false));
-        button.textContent = "Install";
       }
     };
   }
@@ -1027,18 +1275,19 @@ class DockerAppsPanel extends HTMLElement {
     const output = dialog.querySelector("#log-output");
     const start = async (key) => {
       this._stopLogs();
+      const gen = this._logGen;
       output.textContent = "";
       let lines = 0;
-      this._unsubLogs = await this._hass.connection.subscribeMessage(
+      const unsubscribe = await this._hass.connection.subscribeMessage(
         (msg) => {
           if (msg.lines) {
             // the first batch is the tail: always show its end
             const atBottom = lines === 0 || output.scrollHeight - output.scrollTop - output.clientHeight < 40;
-            output.textContent += `${msg.lines.join("\n")}\n`;
+            output.textContent += `${msg.lines.join("\n").replace(ANSI_CODES, "")}\n`;
             lines += msg.lines.length;
-            if (lines > 5000) {
-              output.textContent = output.textContent.split("\n").slice(-4000).join("\n");
-              lines = 4000;
+            if (lines > LOG_LINES_MAX) {
+              output.textContent = output.textContent.split("\n").slice(-LOG_LINES_KEEP).join("\n");
+              lines = LOG_LINES_KEEP;
             }
             if (atBottom && dialog.querySelector("#log-follow").checked) output.scrollTop = output.scrollHeight;
           }
@@ -1047,22 +1296,24 @@ class DockerAppsPanel extends HTMLElement {
         },
         { type: `${DOMAIN}/logs/subscribe`, container: key, tail: 300 },
       );
+      // another container was chosen, or the dialog closed, while subscribing
+      if (gen !== this._logGen) unsubscribe();
+      else this._unsubLogs = unsubscribe;
     };
-    dialog.querySelector("#log-container")?.addEventListener("change", (ev) => start(ev.target.value));
-    dialog.onclick = (ev) => {
-      const r = ev.target.closest("[data-r]")?.dataset.r;
+    dialog.onchange = (ev) => {
+      if (ev.target.id === "log-container") start(ev.target.value);
+    };
+    this._dialogAction = (r) => {
       if (r === "copy") navigator.clipboard?.writeText(output.textContent);
-      if (r === "close") dialog.close();
     };
     dialog.onclose = () => this._stopLogs();
     start(keys[0]);
   }
 
   _stopLogs() {
-    if (this._unsubLogs) {
-      this._unsubLogs();
-      this._unsubLogs = null;
-    }
+    this._logGen += 1;
+    this._unsubLogs?.();
+    this._unsubLogs = null;
   }
 }
 

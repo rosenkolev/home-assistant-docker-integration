@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from ._docker_client import DockerError
-from .apps import AppError
 from .coordinator import DockerAppsConfigEntry
 from .entity import AppEntity, async_add_app_entities
 
@@ -36,10 +33,4 @@ class AppRestartButton(AppEntity, ButtonEntity):
         super().__init__(coordinator, entry, app_key, "restart")
 
     async def async_press(self) -> None:
-        try:
-            await self.runtime.manager.async_app_action(
-                self.app_key, self.docker_data, "restart"
-            )
-        except (AppError, DockerError) as err:
-            raise HomeAssistantError(str(err)) from err
-        await self.coordinator.async_refresh()
+        await self._async_app_action("restart")
