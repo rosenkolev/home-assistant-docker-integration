@@ -115,6 +115,11 @@ class DockerClient:
                 headers=headers,
                 timeout=timeout or DEFAULT_TIMEOUT,
             )
+        except TimeoutError as err:
+            # a running prune can block image and volume listing for minutes
+            raise DockerConnectionError(
+                f"Docker didn't answer {method} {path} in time; it may be busy"
+            ) from err
         except (aiohttp.ClientConnectionError, FileNotFoundError, OSError) as err:
             raise DockerConnectionError(str(err)) from err
 

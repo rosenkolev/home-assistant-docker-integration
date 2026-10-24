@@ -135,10 +135,24 @@ def merge(base, override):
                 and isinstance(value, list)
             ):
                 result[key] = _merge_by_target(result[key], value)
+            elif key in result and key in ("environment", "labels"):
+                # a list (`- KEY=value`) and a map merge by key
+                result[key] = {**as_mapping(result[key]), **as_mapping(value)}
             else:
                 result[key] = merge(result.get(key), value) if key in result else value
         return result
     return override
+
+
+def as_mapping(value) -> dict:
+    """Compose environment or labels as a dict; `KEY` alone maps to None."""
+    if isinstance(value, dict):
+        return dict(value)
+    result = {}
+    for item in value or []:
+        key, sep, val = str(item).partition("=")
+        result[key] = val if sep else None
+    return result
 
 
 def _as_list(value) -> list:

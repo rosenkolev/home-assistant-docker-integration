@@ -97,6 +97,7 @@ class AppStatusSensor(AppEntity, SensorEntity):
             "launcher": manager.in_launcher(self.app_key),
             "web_port": web[0] if web else None,
             "web_path": web[1] if web else None,
+            "web_scheme": web[2] if web else None,
             "managed": manager.is_managed(self.app_key),
             "busy": manager.busy.get(self.app_key),
             "containers": [

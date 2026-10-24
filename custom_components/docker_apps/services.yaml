@@ -89,6 +89,20 @@ container_restart:
       required: true
       selector:
         text:
+set_environment:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    service:
+      required: true
+      selector:
+        text:
+    variables:
+      required: true
+      selector:
+        object:
 prune:
   fields:
     kind:

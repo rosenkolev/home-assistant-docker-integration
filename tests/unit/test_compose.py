@@ -10,6 +10,7 @@ from custom_components.docker_apps._compose import (
     duration_ns,
     interpolate,
     load_model,
+    merge,
     parse_env_file,
     parse_ports,
     size_bytes,
@@ -289,3 +290,10 @@ async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
     await engine.async_down(m)
     assert not docker.containers
     assert "immich_default" not in docker.networks
+
+
+def test__environment_list_and_map_merge_by_key():
+    base = {"services": {"app": {"environment": ["A=1", "B=2"]}}}
+    override = {"services": {"app": {"environment": {"B": "3", "C": "4"}}}}
+    merged = merge(base, override)["services"]["app"]["environment"]
+    assert merged == {"A": "1", "B": "3", "C": "4"}

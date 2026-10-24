@@ -1,13 +1,14 @@
 """Install and package-update a store app into tmp_path with a fake engine."""
 
 import json
+import socket
 
 import pytest
 
 from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._docker_client import DockerError
 from custom_components.docker_apps._store import parse_runtipi
-from custom_components.docker_apps.apps import AppError, AppManager
+from custom_components.docker_apps.apps import AppError, AppManager, host_ports_in_use
 from tests.fake_docker import FakeDocker, FakeRegistry
 from tests.unit.test_apps import MemoryStore, fake_hass
 
@@ -177,3 +178,61 @@ async def test__launcher_is_on_for_store_apps_and_off_for_found_ones(manager):
 
     await manager.async_configure("found-project", launcher=None)
     assert "found-project" not in manager.settings  # back to defaults: nothing stored
+
+
+async def test__check_ports_suggests_a_free_web_port(manager):
+    manager.client.add_container(
+        "other", "nginx", ports=[{"PrivatePort": 80, "PublicPort": 8099, "Type": "tcp"}]
+    )
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
+    assert ports["web_port_taken"] and ports["requested_web_port"] == 8099
+    assert ports["web_port"] == 8100
+    assert ports["busy"] == []
+
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data, 9000)
+    assert not ports["web_port_taken"] and ports["web_port"] == 9000
+
+
+def test__host_ports_in_use_sees_listening_sockets():
+    with socket.socket() as listener:
+        listener.bind(("0.0.0.0", 0))  # noqa: S104
+        listener.listen()
+        taken = listener.getsockname()[1]
+        assert host_ports_in_use({taken}) == {taken}
+    assert host_ports_in_use({taken}) == set()
+
+
+async def test__installing_is_known_while_the_install_runs(manager, monkeypatch):
+    seen = {}
+    apply = manager._async_apply
+
+    async def watch(*args, **kwargs):
+        seen.update(manager.installing)
+        await apply(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_async_apply", watch)
+    app = store_app("1.10.0", 3)
+    await manager.async_install_store_app(app, data=await manager.client.async_fetch())
+    assert seen == {"whoami": app.id}
+    assert manager.installing == {}
+
+
+async def test__set_environment_keeps_the_change_in_the_override(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    app = data.apps["whoami"]
+    before = (tmp_path / "apps" / "whoami" / "compose.yaml").read_text(encoding="utf-8")
+
+    await manager.async_set_environment(app, "whoami", {"PASSWORD": "pa$s"}, data)
+
+    folder = tmp_path / "apps" / "whoami"
+    assert (folder / "compose.yaml").read_text(encoding="utf-8") == before
+    override = (folder / "compose.override.yaml").read_text(encoding="utf-8")
+    assert override.startswith("# Your changes") and "PASSWORD: pa$$s" in override
+    environment = await manager.async_environment(app)
+    assert environment["whoami"]["PASSWORD"] == "pa$s"
+    assert "SECRET" in environment["whoami"]  # the store's own variables stay
+    container = next(iter(manager.client.containers.values()))
+    assert "PASSWORD=pa$s" in container["Config"]["Env"]

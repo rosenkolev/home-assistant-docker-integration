@@ -1,22 +1,31 @@
 """App lifecycle: managed state, update checks, updates, rollback, store installs."""
 
-# cspell:words clickhouse keydb opensearch pgvecto
+# cspell:words clickhouse keydb opensearch pgvecto REUSEADDR
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+import socket
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
+import yaml
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from ._compose import ComposeEngine, ComposeError, ComposeModel, interpolate, load_model
+from ._compose import (
+    ComposeEngine,
+    ComposeError,
+    ComposeModel,
+    as_mapping,
+    interpolate,
+    load_model,
+)
 from ._compose_file import parse_services, update_service_tag
 from ._docker_client import DockerClient, DockerError, health_from_status
 from ._models import LABEL_PROJECT, LABEL_SERVICE, AppInfo, DockerData, split_image
@@ -30,6 +39,8 @@ STORAGE_VERSION = 1
 HISTORY_KEEP = 3
 HEALTH_TIMEOUT = 300
 META_DIR = ".docker-apps"
+OVERRIDE_FILE = "compose.override.yaml"
+OVERRIDE_HEADER = "# Your changes to this app. Kept across updates.\n"
 # Data stores: a new major version needs a manual upgrade, so it holds app updates.
 DATABASE_IMAGES = (
     "postgres",
@@ -143,6 +154,23 @@ def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str | None:
     return match[1] if match else None
 
 
+def host_ports_in_use(ports: set[int]) -> set[int]:
+    """Ports that something on this host already listens on (TCP).
+
+    Only meaningful when Home Assistant runs with the host network: it then sees
+    the ports of host processes and of host-network containers too.
+    """
+    busy = set()
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))  # noqa: S104
+            except OSError:
+                busy.add(port)
+    return busy
+
+
 def primary_service(
     app_key: str, services: list[ServiceUpdate]
 ) -> ServiceUpdate | None:
@@ -184,6 +212,8 @@ class AppManager:
         self.data_root = data_root.rstrip("/")
         self.settings: dict[str, AppSettings] = {}
         self.busy: dict[str, str] = {}
+        # app key -> store app id, while a store app is being installed
+        self.installing: dict[str, str] = {}
         self.progress: dict[str, float | None] = {}
         self.self_container_id: str | None = None
         self.self_inspect: dict | None = None
@@ -261,6 +291,12 @@ class AppManager:
 
     def history_versions(self, app_key: str) -> list[str]:
         return [h["version"] for h in self.get(app_key).history if h.get("version")]
+
+    @property
+    def host_network(self) -> bool:
+        """True when Home Assistant runs with the host network."""
+        host = (self.self_inspect or {}).get("HostConfig") or {}
+        return host.get("NetworkMode") == "host"
 
     def self_service(self, data: DockerData | None, app_key: str) -> str | None:
         """Return the service of the Home Assistant container if it is in this app."""
@@ -730,6 +766,61 @@ class AppManager:
         async with self._operation(app.key, "rollback"):
             await self._async_restore(app, entry, data)
 
+    # --- settings ---
+
+    def override_path(self, app: AppInfo) -> str | None:
+        """The compose.override.yaml of an app, when the app uses one."""
+        path = f"{app.working_dir}/{OVERRIDE_FILE}"
+        return path if path in app.config_files else None
+
+    async def async_environment(self, app: AppInfo) -> dict[str, dict[str, str | None]]:
+        """Environment variables of each service, as compose resolves them."""
+        model = await self.async_load_model(app)
+        return {
+            name: as_mapping(service.get("environment"))
+            for name, service in model.services.items()
+        }
+
+    async def async_set_environment(
+        self, app: AppInfo, service: str, values: dict[str, str], data: DockerData
+    ) -> None:
+        """Change environment variables in compose.override.yaml and recreate.
+
+        The override keeps the change across package updates. Comments in it are
+        not kept, except the header.
+        """
+        path = self.override_path(app)
+        if path is None:
+            raise AppError(f"{app.key} has no {OVERRIDE_FILE} to keep changes in")
+        async with self._operation(app.key, "update"):
+            original = await self._read(path)
+            override = yaml.safe_load(original or "") or {}
+            override["services"] = override.get("services") or {}
+            spec = override["services"].get(service) or {}
+            environment = as_mapping(spec.get("environment"))
+            # a literal `$` would start a variable in compose
+            environment.update(
+                {key: str(value).replace("$", "$$") for key, value in values.items()}
+            )
+            spec["environment"] = environment
+            override["services"][service] = spec
+            content = OVERRIDE_HEADER + yaml.safe_dump(
+                override, sort_keys=False, allow_unicode=True
+            )
+            model = await self.async_load_model(app, overrides={path: content})
+            if service not in model.services:
+                raise AppError(f"service {service} not found in {app.key}")
+            await self._write(path, content)
+            try:
+                await self._async_apply(app.key, model, data, pull=False)
+            except (ComposeError, DockerError, AppError):
+                if original is not None:
+                    await self._write(path, original)
+                await self._async_apply(
+                    app.key, await self.async_load_model(app), data, pull=False
+                )
+                raise
+
     # --- store ---
 
     def store_paths(self, app_key: str) -> tuple[str, str]:
@@ -756,31 +847,23 @@ class AppManager:
 
         app_dir, data_dir = self.store_paths(app_key)
         self.local_path(app_dir)  # fail early when not mounted
-        compose, env = render_app(
+        compose, env = self._render(
             store_app,
             app_key,
-            data_dir,
-            self.data_root,
             {**((installed or {}).get("values") or {}), **(values or {})},
-            {
-                "TZ": str(self.hass.config.time_zone or "UTC"),
-                "PUID": "1000",
-                "PGID": "1000",
-            },
         )
+        if app_key in self.installing:
+            raise AppError(f"{app_key} is being installed")
         if data is not None and not is_update:
-            used = {
-                int(port.split(":", 1)[0])
-                for container in data.containers.values()
-                for port in container.ports
-            }
-            if conflicts := published_ports(interpolate(compose, env)) & used:
+            wanted = published_ports(interpolate(compose, env))
+            if conflicts := await self._async_ports_in_use(wanted, data):
                 raise AppError(
-                    f"ports already in use: {', '.join(map(str, sorted(conflicts)))}"
+                    f"ports already in use: {', '.join(map(str, sorted(conflicts)))}. "
+                    "Choose another port."
                 )
 
         compose_path = f"{app_dir}/compose.yaml"
-        override_path = f"{app_dir}/compose.override.yaml"
+        override_path = f"{app_dir}/{OVERRIDE_FILE}"
         env_path = f"{app_dir}/.env"
         app = AppInfo(
             key=app_key,
@@ -798,6 +881,8 @@ class AppManager:
                     installed.get("version"),
                     dict(installed),
                 )
+            else:
+                self.installing[app_key] = store_app.id
             try:
                 await self._write(compose_path, compose)
                 await self._write(env_path, format_env(env))
@@ -807,9 +892,7 @@ class AppManager:
                 )
                 if await self._read(override_path) is None:
                     await self._write(
-                        override_path,
-                        "# Your changes to this app. Kept across updates.\n"
-                        "services: {}\n",
+                        override_path, f"{OVERRIDE_HEADER}services: {{}}\n"
                     )
                 model = await self.async_load_model(app)
                 await self._async_apply(app_key, model, data, pull=True)
@@ -818,6 +901,8 @@ class AppManager:
                     # a failed first install leaves nothing behind, so it can be retried
                     await self._async_discard_install(app_key, app_dir)
                 raise
+            finally:
+                self.installing.pop(app_key, None)
 
             settings = self.settings.setdefault(app_key, AppSettings())
             settings.managed = True
@@ -834,9 +919,72 @@ class AppManager:
                 "main_service": store_app.main_service,
                 "web_port": (values or {}).get("APP_PORT") or store_app.web_port,
                 "web_path": store_app.web_path,
+                "web_target": store_app.web_target,
+                "web_scheme": store_app.web_scheme,
             }
             await self.async_save()
         return app_key
+
+    def _render(
+        self, store_app: StoreApp, app_key: str, values: dict[str, str]
+    ) -> tuple[str, dict[str, str]]:
+        return render_app(
+            store_app,
+            app_key,
+            self.store_paths(app_key)[1],
+            self.data_root,
+            values,
+            {
+                "TZ": str(self.hass.config.time_zone or "UTC"),
+                "PUID": "1000",
+                "PGID": "1000",
+            },
+        )
+
+    async def _async_ports_in_use(self, ports: set[int], data: DockerData) -> set[int]:
+        """The ports that containers publish, or that the host already listens on."""
+        used = {
+            int(port.split(":", 1)[0])
+            for container in data.containers.values()
+            for port in container.ports
+        }
+        busy = ports & used
+        if self.host_network:
+            busy |= await self.hass.async_add_executor_job(
+                host_ports_in_use, ports - used
+            )
+        return busy
+
+    async def async_check_ports(
+        self, store_app: StoreApp, data: DockerData, web_port: int | None = None
+    ) -> dict:
+        """Ports of a store app before installing: which are taken, and a free web port.
+
+        The web port can be changed in the install dialog; other ports are fixed in
+        the compose file, so a taken one blocks the install.
+        """
+        if store_app.compose is None:
+            return {"busy": [], "web_port": None}
+        web = web_port or store_app.web_port
+        values = {"APP_PORT": str(web)} if web else {}
+        compose, env = self._render(store_app, safe_id(store_app.name), values)
+        wanted = published_ports(interpolate(compose, env))
+        busy = await self._async_ports_in_use(wanted, data)
+        free = web
+        if web and web in busy:
+            fixed = wanted - {web}
+            for candidate in range(web + 1, min(web + 200, 65536)):
+                if candidate not in fixed and not await self._async_ports_in_use(
+                    {candidate}, data
+                ):
+                    free = candidate
+                    break
+        return {
+            "busy": sorted(busy - {web} if free != web else busy),
+            "web_port": free,
+            "web_port_taken": bool(web and web in busy),
+            "requested_web_port": web,
+        }
 
     async def _async_discard_install(self, app_key: str, app_dir: str) -> None:
         """Remove the containers, networks and files of a failed first install."""

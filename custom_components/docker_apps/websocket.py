@@ -12,7 +12,10 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 
 from ._compose_file import parse_services
+from ._compose import ComposeError
+from ._docker_client import DockerError
 from ._models import LABEL_PROJECT, split_image
+from .apps import AppError
 from .catalog import CatalogError
 from .const import DOMAIN
 from .entity import app_identifier, app_web
@@ -21,7 +24,15 @@ from .services import get_container, get_runtime
 
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    for command in (ws_state, ws_store, ws_store_app, ws_resources, ws_logs_subscribe):
+    for command in (
+        ws_state,
+        ws_store,
+        ws_store_app,
+        ws_store_ports,
+        ws_app_environment,
+        ws_resources,
+        ws_logs_subscribe,
+    ):
         websocket_api.async_register_command(hass, command)
 
 
@@ -76,6 +87,8 @@ def ws_state(
                 "icon": (settings.store or {}).get("icon"),
                 "compose": app.is_compose,
                 "editable": manager.can_edit(app),
+                "configurable": manager.can_edit(app)
+                and manager.override_path(app) is not None,
                 "managed": settings.managed,
                 "launcher": manager.in_launcher(app.key),
                 "version": (settings.store or {}).get("version")
@@ -165,6 +178,7 @@ def ws_store(
         for key, s in runtime.manager.settings.items()
         if s.store
     }
+    installing = {store_id: key for key, store_id in runtime.manager.installing.items()}
     connection.send_result(
         msg["id"],
         {
@@ -183,6 +197,7 @@ def ws_store(
                     "version": a.version,
                     "supported": a.supports(arch),
                     "installed": installed.get(a.id),
+                    "installing": installing.get(a.id),
                 }
                 for a in sorted(catalog.apps.values(), key=lambda a: a.name.lower())
             ],
@@ -209,7 +224,57 @@ async def ws_store_app(
         {"name": name, "image": spec.get("image")}
         for name, spec in parse_services(app.compose or "").items()
     ]
+    detail["ports"] = await runtime.manager.async_check_ports(app, runtime.docker.data)
     connection.send_result(msg["id"], detail)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/store/ports",
+        vol.Required("app_id"): str,
+        vol.Optional("web_port"): vol.All(vol.Coerce(int), vol.Range(1, 65535)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_store_ports(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Check the ports of a store app again, for another web port."""
+    _, runtime = get_runtime(hass)
+    try:
+        app = runtime.catalog.get(msg["app_id"])
+    except CatalogError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, str(err))
+        return
+    connection.send_result(
+        msg["id"],
+        await runtime.manager.async_check_ports(
+            app, runtime.docker.data, msg.get("web_port")
+        ),
+    )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/app/environment", vol.Required("app"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_app_environment(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Environment variables of each service of an app, for the settings dialog."""
+    _, runtime = get_runtime(hass)
+    app = runtime.docker.data.apps.get(msg["app"])
+    if app is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "app not found")
+        return
+    try:
+        environment = await runtime.manager.async_environment(app)
+    except (AppError, ComposeError, OSError) as err:
+        connection.send_error(msg["id"], websocket_api.ERR_UNKNOWN_ERROR, str(err))
+        return
+    connection.send_result(msg["id"], {"services": environment})
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/resources"})
@@ -220,9 +285,13 @@ async def ws_resources(
 ) -> None:
     _, runtime = get_runtime(hass)
     client = runtime.client
-    images, volumes, networks = await asyncio.gather(
-        client.async_images(), client.async_volumes(), client.async_networks()
-    )
+    try:
+        images, volumes, networks = await asyncio.gather(
+            client.async_images(), client.async_volumes(), client.async_networks()
+        )
+    except DockerError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_UNKNOWN_ERROR, str(err))
+        return
     used_images = {c.image_id for c in runtime.docker.data.containers.values()}
 
     def resource(item: dict) -> dict:

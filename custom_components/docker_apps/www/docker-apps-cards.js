@@ -35,13 +35,13 @@ const STYLE = `
 
 function appInfo(hass, status) {
   const device = hass.entities?.[status.entity_id]?.device_id;
-  const { docker_app: key, entity_picture: picture, web_port: port, web_path: path } = status.attributes;
+  const { docker_app: key, entity_picture: picture, web_port: port, web_path: path, web_scheme: scheme } = status.attributes;
   return {
     id: status.entity_id,
     name: hass.devices?.[device]?.name_by_user || hass.devices?.[device]?.name || key,
     picture,
     state: status.state,
-    url: port ? `http://${location.hostname}:${port}${path || "/"}` : null,
+    url: port ? `${scheme || "http"}://${location.hostname}:${port}${path || "/"}` : null,
   };
 }
 

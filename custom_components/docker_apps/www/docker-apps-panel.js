@@ -5,6 +5,9 @@
 const DOMAIN = "docker_apps";
 const REFRESH_MS = 5000;
 const STORE_PAGE = 60;
+// tab -> URL hash, so a refresh opens the same tab
+const TABS = { apps: ["installed", "Installed"], store: ["app-store", "App store"], resources: ["images-volumes", "Images &amp; volumes"] };
+const tabFromHash = () => Object.keys(TABS).find((t) => `#${TABS[t][0]}` === location.hash) || "apps";
 
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -52,7 +55,7 @@ const containerStatus = (c) => {
 const icon = (name) => `<ha-icon icon="mdi:${name}"></ha-icon>`;
 
 // The app runs on the Docker host, reached at the same address as Home Assistant.
-const webUrl = ([port, path]) => `http://${location.hostname}:${port}${path}`;
+const webUrl = ([port, path, scheme]) => `${scheme || "http"}://${location.hostname}:${port}${path}`;
 
 // Store descriptions and release notes are markdown; HA's own element renders them.
 const markdown = (root, selector, text) => {
@@ -193,6 +196,7 @@ const STYLE = `
   dialog .head { display: flex; align-items: center; gap: 12px; padding: 18px 20px 8px; }
   dialog .head .name { font-size: 20px; }
   dialog .body { padding: 8px 20px 16px; max-height: 70vh; overflow: auto; }
+  dialog .body li { overflow-wrap: anywhere; }
   dialog .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 20px 18px; }
   dialog label { display: block; margin: 14px 0 6px; font-size: 13px; color: var(--secondary-text-color); }
   dialog input, dialog select { width: 100%; }
@@ -223,7 +227,7 @@ class DockerAppsPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._tab = "apps";
+    this._tab = tabFromHash();
     this._filter = "";
     this._category = "";
     this._state = null;
@@ -252,7 +256,9 @@ class DockerAppsPanel extends HTMLElement {
 
   connectedCallback() {
     this._timer = setInterval(() => {
-      if (document.visibilityState === "visible" && this._tab === "apps" && !this._dialogOpen() && !this._menu) this._load();
+      // the store refreshes only while an app is being installed
+      const live = this._tab === "apps" || (this._tab === "store" && this._store?.apps.some((a) => a.installing));
+      if (document.visibilityState === "visible" && live && !this._dialogOpen() && !this._menu) this._load();
     }, REFRESH_MS);
   }
 
@@ -305,11 +311,9 @@ class DockerAppsPanel extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${STYLE}</style>
       <header><ha-menu-button></ha-menu-button><h1>Apps</h1><span class="host"></span></header>
-      <nav>
-        <button data-tab="apps" class="active">Installed</button>
-        <button data-tab="store">App store</button>
-        <button data-tab="resources">Images &amp; volumes</button>
-      </nav>
+      <nav>${Object.entries(TABS)
+        .map(([tab, [, label]]) => `<button data-tab="${tab}" class="${tab === this._tab ? "active" : ""}">${label}</button>`)
+        .join("")}</nav>
       <main></main>
       <dialog id="dialog"></dialog>`;
     const menu = this.shadowRoot.querySelector("ha-menu-button");
@@ -327,6 +331,7 @@ class DockerAppsPanel extends HTMLElement {
 
   _setTab(tab) {
     this._tab = tab;
+    history.replaceState(history.state, "", `#${TABS[tab][0]}`);
     this._filter = "";
     this._menu = null;
     this.shadowRoot.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -415,6 +420,7 @@ class DockerAppsPanel extends HTMLElement {
 
     const menuItems = [
       ["launcher", app.launcher ? "checkbox-marked-outline" : "checkbox-blank-outline", "Show in app launcher"],
+      app.configurable ? ["environment", "cog-outline", "Settings & passwords…"] : null,
       app.compose && app.editable ? ["recreate", "autorenew", "Recreate"] : null,
       app.history?.length && app.editable ? ["rollback", "history", "Roll back…"] : null,
       app.managed && !app.store ? ["settings", "tune-variant", "Update settings…"] : null,
@@ -536,6 +542,7 @@ class DockerAppsPanel extends HTMLElement {
     const appIcon = app.icon ? `<img class="app-icon" loading="lazy" src="${esc(app.icon)}" alt="">` : `<div class="app-icon">${icon("package-variant")}</div>`;
     let action = `<button class="btn primary" data-action="install" data-store="${esc(app.id)}">Install</button>`;
     if (app.installed) action = `<span class="chip ok">${icon("check")}Installed</span>`;
+    else if (app.installing) action = `<span class="chip busy">${icon("progress-download")}Installing…</span>`;
     else if (!app.supported) action = `<span class="chip off">Not for ${esc(this._state?.host?.arch || "this CPU")}</span>`;
     else if (this._state?.read_only) action = "";
     return `
@@ -556,7 +563,11 @@ class DockerAppsPanel extends HTMLElement {
     const disk = this._state?.disk;
     if (!res) return `<div class="empty">Loading…</div>`;
     const readOnly = this._state?.read_only;
-    const prune = (kind, text) => (readOnly ? "" : `<button class="btn" data-action="prune" data-kind="${kind}">${text}</button>`);
+    // one prune at a time: Docker refuses a second one and blocks listing while it runs
+    const prune = (kind, text) =>
+      readOnly
+        ? ""
+        : `<button class="btn" data-action="prune" data-kind="${kind}" ${this._pruning ? "disabled" : ""}>${this._pruning === kind ? "Removing…" : text}</button>`;
     const table = (title, headers, rows) => `
       <div class="card" style="margin-bottom:16px"><div class="section"><div class="name">${title}</div></div>
         <div class="scroll"><table><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>${rows}</table></div></div>`;
@@ -695,6 +706,9 @@ class DockerAppsPanel extends HTMLElement {
         case "settings":
           await this._settings(appInfo);
           break;
+        case "environment":
+          await this._environment(appInfo);
+          break;
         case "launcher":
           await this._call("manage", { app, launcher: !appInfo.launcher });
           break;
@@ -713,8 +727,14 @@ class DockerAppsPanel extends HTMLElement {
           break;
         case "prune":
           if (await this._confirm("Remove unused resources?", `${esc(button.textContent)}. This can't be undone.`, "Remove", "danger")) {
-            const result = await this._call("prune", { kind }, true);
-            this._toast(`Removed ${result?.removed ?? 0} items, freed ${bytes(result?.space_reclaimed)}`);
+            this._pruning = kind;
+            this._renderMain();
+            try {
+              const result = await this._call("prune", { kind }, true);
+              this._toast(`Removed ${result?.removed ?? 0} items, freed ${bytes(result?.space_reclaimed)}`);
+            } finally {
+              this._pruning = null;
+            }
           }
           break;
         case "install":
@@ -837,6 +857,65 @@ class DockerAppsPanel extends HTMLElement {
     if (values) await this._call("manage", { app: app.key, managed: true, ...values });
   }
 
+  async _environment(app) {
+    const { services } = await this._ws("app/environment", { app: app.key });
+    const secret = /pass|secret|token|key/i;
+    const sections = Object.entries(services)
+      .filter(([, env]) => Object.keys(env).length)
+      .map(
+        ([service, env]) => `<h3>${esc(service)}</h3>${Object.entries(env)
+          .map(
+            ([key, value]) => `<label>${esc(key)}</label>
+              <div class="row"><input class="mono grow" data-service="${esc(service)}" data-key="${esc(key)}"
+                type="${secret.test(key) ? "password" : "text"}" value="${esc(value ?? "")}">
+              ${secret.test(key) ? `<button class="icon-btn small" data-r="reveal" title="Show" aria-label="Show">${icon("eye-outline")}</button>` : ""}</div>`,
+          )
+          .join("")}`,
+      )
+      .join("");
+    const dialog = this._dialog(
+      `Settings · ${app.name}`,
+      `<div class="muted">Changes are kept in <code>compose.override.yaml</code>, so they stay after updates. Saving recreates the changed containers.</div>
+       ${sections || `<div class="empty">This app has no environment variables.</div>`}`,
+      `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="save" ${sections ? "" : "disabled"}>Save</button>`,
+    );
+    dialog.onclick = async (ev) => {
+      const button = ev.target.closest("[data-r]");
+      const r = button?.dataset.r;
+      if (r === "reveal") {
+        const input = button.parentElement.querySelector("input");
+        input.type = input.type === "password" ? "text" : "password";
+        return;
+      }
+      if (r === "no" || r === "close") dialog.close();
+      if (r !== "save") return;
+      const changes = {};
+      dialog.querySelectorAll("input[data-key]").forEach((input) => {
+        if (input.value !== input.defaultValue) {
+          (changes[input.dataset.service] ??= {})[input.dataset.key] = input.value;
+        }
+      });
+      if (!Object.keys(changes).length) {
+        dialog.close();
+        return;
+      }
+      const fields = [...dialog.querySelectorAll("input, button")];
+      fields.forEach((field) => (field.disabled = true));
+      button.textContent = "Saving…";
+      try {
+        for (const [service, variables] of Object.entries(changes)) {
+          await this._call("set_environment", { app: app.key, service, variables });
+        }
+        dialog.close();
+        this._toast(`${app.name} settings saved`);
+      } catch (err) {
+        fields.forEach((field) => (field.disabled = false));
+        button.textContent = "Save";
+      }
+      this._load();
+    };
+  }
+
   async _install(storeId) {
     const app = await this._ws("store/app", { app_id: storeId });
     const inputType = { password: "password", number: "number", email: "email", url: "url" };
@@ -855,15 +934,56 @@ class DockerAppsPanel extends HTMLElement {
       `<div class="md" id="description"></div>
        <h3>Containers</h3><ul style="margin:0;padding-left:20px;line-height:1.8;font-size:14px">${services}</ul>
        <label>Name (compose project)</label><input id="app-name" value="${esc(app.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"))}">
-       ${app.web_port ? `<label>Web port</label><input data-var="APP_PORT" type="number" value="${esc(app.web_port)}">` : ""}
+       ${app.web_port ? `<label>Web port</label><input data-var="APP_PORT" type="number" value="${esc(app.ports.web_port || app.web_port)}">` : ""}
+       <div id="ports"></div>
        ${fields}
        ${app.variables.some((v) => v.type === "random") ? `<div class="muted" style="margin-top:12px">Passwords and secrets are generated.</div>` : ""}
        <div class="muted" style="margin-top:12px">Files go to <code>${esc(this._state.apps_root)}/&lt;name&gt;</code>, data to <code>${esc(this._state.data_root)}/&lt;name&gt;</code>.</div>`,
       `<button class="btn" data-r="no">Cancel</button><button class="btn primary" data-r="install">Install</button>`,
     );
     markdown(dialog, "#description", app.description || app.tagline);
-    dialog.oninput = (ev) => ev.target.classList.remove("invalid");
+    const installButton = dialog.querySelector("[data-r=install]");
+    const showPorts = (ports, first = false) => {
+      const notes = [];
+      let blocked = false;
+      if (ports.web_port_taken && ports.web_port !== ports.requested_web_port) {
+        notes.push(
+          first
+            ? ["info", `Port ${ports.requested_web_port} is taken, so the free port ${ports.web_port} is filled in.`]
+            : ["bad", `Port ${ports.requested_web_port} is taken. <button class="chip info" data-r="use-port" data-port="${ports.web_port}">Use ${ports.web_port}</button>`],
+        );
+        blocked = !first;
+      } else if (ports.web_port_taken) {
+        notes.push(["bad", `Port ${ports.requested_web_port} is taken. Choose another one.`]);
+        blocked = true;
+      }
+      if (ports.busy.length) {
+        notes.push(["bad", `Port ${ports.busy.join(", ")} is used by another app or service, and ${esc(app.name)} needs it, so it can't be installed.`]);
+        blocked = true;
+      }
+      dialog.querySelector("#ports").innerHTML = notes
+        .map(([cls, text]) => `<div class="banner ${cls === "bad" ? "error" : ""}">${icon(cls === "bad" ? "alert-circle-outline" : "information-outline")}<div class="grow" style="font-size:14px">${text}</div></div>`)
+        .join("");
+      installButton.disabled = blocked;
+    };
+    showPorts(app.ports, true);
+    let portTimer;
+    dialog.oninput = (ev) => {
+      ev.target.classList.remove("invalid");
+      if (ev.target.dataset.var !== "APP_PORT") return;
+      clearTimeout(portTimer);
+      const port = Number(ev.target.value);
+      if (!port) return;
+      portTimer = setTimeout(async () => showPorts(await this._ws("store/ports", { app_id: storeId, web_port: port })), 400);
+    };
     dialog.onclick = async (ev) => {
+      const use = ev.target.closest("[data-r=use-port]");
+      if (use) {
+        const input = dialog.querySelector("[data-var=APP_PORT]");
+        input.value = use.dataset.port;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        return;
+      }
       const r = ev.target.closest("[data-r]")?.dataset.r;
       if (r === "no" || r === "close") dialog.close();
       if (r !== "install") return;

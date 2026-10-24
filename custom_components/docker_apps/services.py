@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import voluptuous as vol
+from homeassistant.components import persistent_notification
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -72,6 +75,8 @@ async def _call(coro):
 
 @callback
 def async_register_services(hass: HomeAssistant) -> None:
+    prune_lock = asyncio.Lock()
+
     def writable_runtime() -> DockerAppsRuntime:
         _, runtime = get_runtime(hass)
         if runtime.read_only:
@@ -141,7 +146,12 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def prune(call: ServiceCall) -> ServiceResponse:
         runtime = writable_runtime()
-        resource, filters = PRUNE[call.data["kind"]]
+        # Docker refuses a second prune while one runs, so they wait for each other
+        async with prune_lock:
+            return await _async_prune(runtime, call.data["kind"])
+
+    async def _async_prune(runtime: DockerAppsRuntime, kind: str) -> ServiceResponse:
+        resource, filters = PRUNE[kind]
         # ImagesDeleted lists every layer too, so images are counted before and after
         if resource == "images":
             before = len(await _call(runtime.client.async_images()))
@@ -156,6 +166,16 @@ def async_register_services(hass: HomeAssistant) -> None:
             )
         return {"space_reclaimed": result.get("SpaceReclaimed", 0), "removed": removed}
 
+    async def set_environment(call: ServiceCall) -> None:
+        runtime = writable_runtime()
+        app = get_app(runtime, call.data[ATTR_APP])
+        await _call(
+            runtime.manager.async_set_environment(
+                app, call.data["service"], call.data["variables"], runtime.docker.data
+            )
+        )
+        await runtime.docker.async_refresh()
+
     async def check_updates(call: ServiceCall) -> None:
         _, runtime = get_runtime(hass)
         await runtime.updates.async_check_now(refresh_catalog=call.data["repositories"])
@@ -166,14 +186,26 @@ def async_register_services(hass: HomeAssistant) -> None:
         arch = runtime.docker.data.host.arch
         if not store_app.supports(arch):
             raise ServiceValidationError(f"{store_app.name} doesn't support {arch}")
-        key = await _call(
-            runtime.manager.async_install_store_app(
-                store_app,
-                app_key=call.data.get("name"),
-                values=call.data.get("values"),
-                data=runtime.docker.data,
+        notification_id = f"{DOMAIN}_install_{store_app.app_id}"
+        try:
+            key = await _call(
+                runtime.manager.async_install_store_app(
+                    store_app,
+                    app_key=call.data.get("name"),
+                    values=call.data.get("values"),
+                    data=runtime.docker.data,
+                )
             )
-        )
+        except HomeAssistantError as err:
+            # also shown after the page was closed or refreshed during the install
+            persistent_notification.async_create(
+                hass,
+                f"{store_app.name} wasn't installed: {err}",
+                title="Docker Apps",
+                notification_id=notification_id,
+            )
+            raise
+        persistent_notification.async_dismiss(hass, notification_id)
         await runtime.docker.async_refresh()
         await runtime.updates.async_check_now()
         return {"app": key}
@@ -242,6 +274,14 @@ def async_register_services(hass: HomeAssistant) -> None:
         "container_restart": (
             container_action,
             {vol.Required(ATTR_CONTAINER): cv.string},
+        ),
+        "set_environment": (
+            set_environment,
+            {
+                vol.Required(ATTR_APP): cv.string,
+                vol.Required("service"): cv.string,
+                vol.Required("variables"): {cv.string: cv.string},
+            },
         ),
         "prune": (prune, {vol.Required("kind"): vol.In(list(PRUNE))}),
         "check_updates": (
