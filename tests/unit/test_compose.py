@@ -287,7 +287,7 @@ async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
     await engine.async_up(m)
     assert ("remove", "immich-database-1") in docker.calls
 
-    await engine.async_down(m)
+    await engine.async_down(m.project)
     assert not docker.containers
     assert "immich_default" not in docker.networks
 
@@ -297,3 +297,24 @@ def test__environment_list_and_map_merge_by_key():
     override = {"services": {"app": {"environment": {"B": "3", "C": "4"}}}}
     merged = merge(base, override)["services"]["app"]["environment"]
     assert merged == {"A": "1", "B": "3", "C": "4"}
+
+
+def test__override_and_reset_tags_replace_instead_of_merge():
+    base = "services:\n  app:\n    image: a\n    volumes:\n      - ./data:/data\n      - /x:/x\n    ports:\n      - 80:80\n"
+    override = "services:\n  app:\n    volumes: !override\n      - /new:/new\n    ports: !reset\n"
+    m = load_model(
+        "p",
+        "/srv/p",
+        {"/srv/p/compose.yaml": base, "/srv/p/compose.override.yaml": override},
+        None,
+    )
+    assert m.services["app"]["volumes"] == ["/new:/new"]
+    assert "ports" not in m.services["app"]
+
+
+def test__interpolate_checks_the_variable_before_the_operator():
+    with pytest.raises(ComposeError, match="PW is required"):
+        interpolate("${PW:?must-be-set}", {})
+    assert interpolate("${X:+--flag}", {"X": "1"}) == "--flag"
+    assert interpolate("${X:+--flag}", {}) == ""
+    assert interpolate("${A-b-c}", {}) == "b-c"

@@ -103,6 +103,20 @@ set_environment:
       required: true
       selector:
         object:
+set_volumes:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    service:
+      required: true
+      selector:
+        text:
+    volumes:
+      required: true
+      selector:
+        object:
 prune:
   fields:
     kind:

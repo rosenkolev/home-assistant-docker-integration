@@ -16,7 +16,8 @@ Manage your Docker apps from Home Assistant, like the Apps page of Home Assistan
 * **Apps panel:** every app (compose project) with status, health, CPU, memory and uptime. Start, stop, restart, open and remove apps.
 * **Logs on demand:** live logs per container, only while you look at them.
 * **Updates:** in **Settings > Updates**. A multi-container app (Immich, ...) is updated as **one package**, with automatic rollback if it doesn't come up healthy. Databases are not updated by surprise.
-* **App store:** install apps from **CasaOS** and **Runtipi** repositories. Secrets are generated for you.
+* **App store:** install apps from **CasaOS** and **Runtipi** repositories. Secrets are generated for you, and a free web port is picked when the default one is taken.
+* **App settings:** see and change an app's environment variables and passwords, and add folders or Docker volumes (for example your media or the Home Assistant config) from the panel. Changes survive updates.
 * **Clean-up:** prune unused containers, images, volumes, networks and build cache.
 * **App launcher card:** a dashboard card that opens your apps.
 * **Few entities:** about 5 per app, no matter how many containers it has.

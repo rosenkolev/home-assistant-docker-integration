@@ -8,7 +8,7 @@ conditions, env_file, profiles, deploy resources, gpus, restart, logging, ...).
 Not covered: `build`, `extends`, `include`, swarm-only keys.
 """
 
-# cspell:words cpuset Dockge kmgt memswap nocopy Pids pstart Rootfs Sysctls tmpfs Ulimits Userns
+# cspell:words cpuset Dockge kmgt memswap nocopy Pids pstart Rootfs Sysctls Ulimits Userns
 
 from __future__ import annotations
 
@@ -49,6 +49,8 @@ NEW_SUFFIX = "-docker-apps-new"
 _VAR = re.compile(
     r"\$(?:(?P<escaped>\$)|\{(?P<braced>[^}]+)\}|(?P<named>[A-Za-z_][A-Za-z0-9_]*))"
 )
+# inside ${...}: a name, then an optional operator (:- - :? ? :+ +) and its argument
+_BRACED = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])(.*))?", re.DOTALL)
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)")
 _DURATION_NS = {"ns": 1, "us": 1e3, "ms": 1e6, "s": 1e9, "m": 60e9, "h": 3600e9}
 _SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?$", re.IGNORECASE)
@@ -74,7 +76,9 @@ def parse_env_file(text: str) -> dict[str, str]:
         if not sep:
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        elif len(value) >= 2 and value[0] == value[-1] == "'":
             value = value[1:-1]
         elif " #" in value:
             value = value.split(" #", 1)[0].rstrip()
@@ -96,22 +100,83 @@ def interpolate(value, env: dict[str, str]):
             return "$"
         if match["named"]:
             return env.get(match["named"], "")
-        expr = match["braced"]
-        for op in (":-", "-", ":?", "?", ":+", "+"):
-            if op in expr:
-                name, arg = expr.split(op, 1)
-                current = env.get(name)
-                unset = current is None or (op.startswith(":") and current == "")
-                if op in (":-", "-"):
-                    return interpolate(arg, env) if unset else current
-                if op in (":?", "?"):
-                    if unset:
-                        raise ComposeError(f"variable {name} is required: {arg}")
-                    return current
-                return "" if unset else interpolate(arg, env)
-        return env.get(expr, "")
+        parsed = _BRACED.fullmatch(match["braced"])
+        if parsed is None:
+            return env.get(match["braced"], "")
+        name, op, arg = parsed.groups()
+        current = env.get(name)
+        if op is None:
+            return current or ""
+        unset = current is None or (op.startswith(":") and current == "")
+        if op.endswith("-"):
+            return interpolate(arg, env) if unset else current
+        if op.endswith("?"):
+            if unset:
+                raise ComposeError(f"variable {name} is required: {arg}")
+            return current
+        return "" if unset else interpolate(arg, env)
 
     return _VAR.sub(replace, value)
+
+
+class Override:
+    """`!override value`: replaces the value of earlier files instead of merging."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+class Reset:
+    """`!reset`: removes the value of earlier files."""
+
+
+class ComposeLoader(yaml.SafeLoader):
+    """YAML loader that knows the compose merge tags `!override` and `!reset`."""
+
+
+def _construct_override(loader: yaml.SafeLoader, node: yaml.Node) -> Override:
+    if isinstance(node, yaml.SequenceNode):
+        return Override(loader.construct_sequence(node, deep=True))
+    if isinstance(node, yaml.MappingNode):
+        return Override(loader.construct_mapping(node, deep=True))
+    return Override(loader.construct_scalar(node))
+
+
+ComposeLoader.add_constructor("!override", _construct_override)
+ComposeLoader.add_constructor("!reset", lambda loader, node: Reset())
+
+
+class ComposeDumper(yaml.SafeDumper):
+    """YAML dumper that writes `!override` values back."""
+
+
+def _represent_override(dumper: yaml.SafeDumper, data: Override) -> yaml.Node:
+    if isinstance(data.value, list):
+        return dumper.represent_sequence("!override", data.value)
+    if isinstance(data.value, dict):
+        return dumper.represent_mapping("!override", data.value)
+    return dumper.represent_scalar("!override", str(data.value))
+
+
+ComposeDumper.add_representer(Override, _represent_override)
+ComposeDumper.add_representer(
+    Reset, lambda dumper, data: dumper.represent_scalar("!reset", "")
+)
+
+
+def load_yaml(text: str):
+    return yaml.load(text, Loader=ComposeLoader)  # noqa: S506 (a SafeLoader)
+
+
+def untag(value):
+    """Resolve merge tags in a value that has nothing to merge with."""
+    if isinstance(value, Override):
+        return untag(value.value)
+    if isinstance(value, dict):
+        return {k: untag(v) for k, v in value.items() if not isinstance(v, Reset)}
+    if isinstance(value, list):
+        return [untag(v) for v in value]
+    return value
 
 
 def merge(base, override):
@@ -119,7 +184,13 @@ def merge(base, override):
     if isinstance(base, dict) and isinstance(override, dict):
         result = dict(base)
         for key, value in override.items():
-            if key in result and key in (
+            if isinstance(value, Reset):
+                result.pop(key, None)
+            elif isinstance(value, Override):
+                result[key] = untag(value.value)
+            elif key not in result:
+                result[key] = untag(value)
+            elif key in (
                 "ports",
                 "expose",
                 "dns",
@@ -129,17 +200,13 @@ def merge(base, override):
                 result[key] = list(
                     dict.fromkeys([*_as_list(result[key]), *_as_list(value)])
                 )
-            elif (
-                key in result
-                and key in ("volumes", "devices")
-                and isinstance(value, list)
-            ):
+            elif key in ("volumes", "devices") and isinstance(value, list):
                 result[key] = _merge_by_target(result[key], value)
-            elif key in result and key in ("environment", "labels"):
+            elif key in ("environment", "labels"):
                 # a list (`- KEY=value`) and a map merge by key
                 result[key] = {**as_mapping(result[key]), **as_mapping(value)}
             else:
-                result[key] = merge(result.get(key), value) if key in result else value
+                result[key] = merge(result[key], value)
         return result
     return override
 
@@ -161,10 +228,7 @@ def _as_list(value) -> list:
 
 def _merge_by_target(base: list, override: list) -> list:
     def target(item):
-        if isinstance(item, dict):
-            return item.get("target")
-        parts = str(item).split(":")
-        return parts[1] if len(parts) > 1 else parts[0]
+        return item.get("target") if isinstance(item, dict) else split_volume(item)[1]
 
     result = {target(i): i for i in base}
     result.update({target(i): i for i in override})
@@ -198,13 +262,14 @@ def load_model(
     env = parse_env_file(env_text) if env_text else {}
     data: dict = {}
     for name, text in files.items():
-        loaded = yaml.safe_load(text) or {}
+        loaded = load_yaml(text) or {}
         if not isinstance(loaded, dict):
             raise ComposeError(f"{name} is not a compose file")
         for key in ("extends", "include"):
             if key in loaded:
                 raise ComposeError(f"'{key}' is not supported ({name})")
         data = merge(data, loaded)
+    data = untag(data)
 
     data = interpolate(data, env)
     project = data.get("name") or project
@@ -291,31 +356,18 @@ def _split_command(value) -> list[str] | None:
 
 def _environment(service: dict) -> list[str]:
     values = dict(service.get("_env_file_values") or {})
-    env = service.get("environment") or {}
-    if isinstance(env, list):
-        for item in env:
-            key, sep, value = str(item).partition("=")
-            if sep:
-                values[key] = value
-            else:
-                values.pop(key, None)
-    else:
-        for key, value in env.items():
-            if value is None:
-                values.pop(key, None)
-            else:
-                values[key] = (
-                    ("true" if value else "false")
-                    if isinstance(value, bool)
-                    else str(value)
-                )
+    for key, value in as_mapping(service.get("environment")).items():
+        if value is None:
+            values.pop(key, None)
+        elif isinstance(value, bool):
+            values[key] = "true" if value else "false"
+        else:
+            values[key] = str(value)
     return [f"{k}={v}" for k, v in values.items()]
 
 
 def _labels(value) -> dict[str, str]:
-    if isinstance(value, list):
-        return dict((item.split("=", 1) + [""])[:2] for item in (str(i) for i in value))
-    return {k: str(v) for k, v in (value or {}).items()}
+    return {k: "" if v is None else str(v) for k, v in as_mapping(value).items()}
 
 
 def parse_ports(ports: list) -> tuple[dict, dict]:
@@ -360,13 +412,45 @@ def _expand_range(target: str, published: str) -> list[tuple[str, str]]:
     return [(str(p), published) for p in range(start, end + 1)]
 
 
-def _volume_name(model: ComposeModel, name: str) -> str:
-    spec = model.volumes.get(name) or {}
+VOLUME_MODES = {"ro", "rw", "z", "Z", "nocopy", "cached", "delegated", "consistent"}
+
+
+def split_volume(text: str) -> tuple[str | None, str, str]:
+    """Split a short volume `source:target[:mode]` into (source, target, mode).
+
+    Read from the right, so a source with a colon (a drive letter in tests on
+    Windows) stays whole. A volume without source is anonymous.
+    """
+    parts = str(text).split(":")
+    mode = ""
+    if len(parts) > 2 and set(parts[-1].split(",")) <= VOLUME_MODES:
+        mode = parts.pop()
+    if len(parts) == 1:
+        return None, parts[0], mode
+    return ":".join(parts[:-1]), parts[-1], mode
+
+
+def is_bind_source(source: str) -> bool:
+    """A host path (bind mount) rather than a volume name.
+
+    `C:/` is a drive letter, only seen in tests on Windows.
+    """
+    return source.startswith(("/", ".")) or source[1:3] == ":/"
+
+
+def _resource_name(specs: dict[str, dict], project: str, key: str) -> str:
+    """Docker name of a compose volume or network: its `name`, as is when external,
+    else prefixed with the project."""
+    spec = specs.get(key) or {}
     if spec.get("name"):
         return spec["name"]
     if spec.get("external"):
-        return name
-    return f"{model.project}_{name}"
+        return key
+    return f"{project}_{key}"
+
+
+def _volume_name(model: ComposeModel, name: str) -> str:
+    return _resource_name(model.volumes, model.project, name)
 
 
 def parse_volumes(
@@ -401,13 +485,12 @@ def parse_volumes(
             binds.append(f"{_volume_name(model, source)}:{target}:{','.join(options)}")
             continue
 
-        parts = str(volume).split(":")
-        if len(parts) == 1:
-            anonymous[parts[0]] = {}
+        source, target, mode = split_volume(volume)
+        mode = mode or "rw"
+        if source is None:
+            anonymous[target] = {}
             continue
-        source, target = parts[0], parts[1]
-        mode = parts[2] if len(parts) > 2 else "rw"
-        if source.startswith(("/", ".")):
+        if is_bind_source(source):
             binds.append(f"{model.resolve(source)}:{target}:{mode}")
         else:
             binds.append(f"{_volume_name(model, source)}:{target}:{mode}")
@@ -504,12 +587,7 @@ def service_networks(model: ComposeModel, service: dict) -> dict[str, dict]:
 
 
 def network_name(model: ComposeModel, name: str) -> str:
-    spec = model.networks.get(name) or {}
-    if spec.get("name"):
-        return spec["name"]
-    if spec.get("external"):
-        return name
-    return f"{model.project}_{name}"
+    return _resource_name(model.networks, model.project, name)
 
 
 def container_name(model: ComposeModel, service_name: str) -> str:
@@ -597,8 +675,8 @@ def build_container_config(
         host["Mounts"] = mounts
     if tmpfs := service.get("tmpfs"):
         host["Tmpfs"] = {
-            (t.split(":", 1) + [""])[0]: (t.split(":", 1) + [""])[1]
-            for t in _as_list(tmpfs)
+            path: options
+            for path, _, options in (str(t).partition(":") for t in _as_list(tmpfs))
         }
     if logging := service.get("logging"):
         host["LogConfig"] = {
@@ -642,7 +720,7 @@ def build_container_config(
         "MacAddress": service.get("mac_address"),
         "HostConfig": _drop_none(host),
     }
-    if networks and "NetworkMode" in host and not mode:
+    if networks:
         first = next(iter(networks))
         endpoint = dict(networks[first])
         endpoint["Aliases"] = list(
@@ -771,7 +849,7 @@ class ComposeEngine:
     def __init__(self, client: DockerClient):
         self.client = client
 
-    async def _project_containers(self, project: str) -> list[dict]:
+    async def project_containers(self, project: str) -> list[dict]:
         return [
             c
             for c in await self.client.async_containers(all=True)
@@ -792,8 +870,11 @@ class ComposeEngine:
         for index, image in enumerate(images):
             if progress:
                 progress(f"Pulling {image}", index / max(len(images), 1))
-            async for _ in self.client.async_image_pull(image):
-                pass
+            await self.async_pull_image(image)
+
+    async def async_pull_image(self, image: str) -> None:
+        async for _ in self.client.async_image_pull(image):
+            pass
 
     async def _ensure_networks(self, model: ComposeModel, names: set[str]) -> None:
         existing = {n["Name"] for n in await self.client.async_networks()}
@@ -860,11 +941,11 @@ class ComposeEngine:
                 )
             )
 
-    async def _image_id(self, image: str) -> str:
+    async def async_image_id(self, image: str) -> str:
+        """Id of a local image; pulled first when missing."""
         info = await self.client.async_image_inspect(image)
         if info is None:
-            async for _ in self.client.async_image_pull(image):
-                pass
+            await self.async_pull_image(image)
             info = await self.client.async_image_inspect(image)
         if info is None:
             raise ComposeError(f"image {image} not found")
@@ -885,16 +966,13 @@ class ComposeEngine:
                     return
                 if health == "unhealthy":
                     raise ComposeError(f"dependency {name} is unhealthy")
+                if state.get("Status") in ("exited", "dead"):
+                    raise ComposeError(f"dependency {name} stopped")
             elif condition == "service_completed_successfully":
                 if state.get("Status") == "exited":
                     if state.get("ExitCode") == 0:
                         return
                     raise ComposeError(f"dependency {name} failed")
-            if (
-                state.get("Status") in ("exited", "dead")
-                and condition == "service_healthy"
-            ):
-                raise ComposeError(f"dependency {name} stopped")
             await asyncio.sleep(2)
         raise ComposeError(f"timeout waiting for {name} ({condition})")
 
@@ -915,7 +993,7 @@ class ComposeEngine:
             needed.update(service_networks(model, model.services[name]))
         await self._ensure_networks(model, needed)
 
-        existing = await self._project_containers(model.project)
+        existing = await self.project_containers(model.project)
         by_service: dict[str, list[dict]] = {}
         for raw in existing:
             by_service.setdefault(raw["Labels"].get(LABEL_SERVICE), []).append(raw)
@@ -949,7 +1027,7 @@ class ComposeEngine:
         force: bool,
     ) -> str:
         config = build_container_config(model, name, running)
-        image_id = await self._image_id(config["Image"])
+        image_id = await self.async_image_id(config["Image"])
         wanted_hash = config["Labels"][LABEL_CONFIG_HASH]
 
         target = container_name(model, name)
@@ -1006,17 +1084,17 @@ class ComposeEngine:
                 raise
         await self.client.async_container_remove(container_id, volumes)
 
-    async def async_down(self, model: ComposeModel, volumes: bool = False) -> None:
+    async def async_down(self, project: str, volumes: bool = False) -> None:
         """Remove the containers and networks of the project, and its volumes if asked."""
-        for raw in reversed(await self._project_containers(model.project)):
+        for raw in await self.project_containers(project):
             await self.async_remove(raw["Id"], volumes)
         for network in await self.client.async_networks():
-            if (network.get("Labels") or {}).get(LABEL_PROJECT) == model.project:
+            if (network.get("Labels") or {}).get(LABEL_PROJECT) == project:
                 try:
                     await self.client.async_network_remove(network["Id"])
                 except DockerError as err:
                     _LOGGER.debug("Network %s kept: %s", network["Name"], err)
         if volumes:
             for volume in await self.client.async_volumes():
-                if (volume.get("Labels") or {}).get(LABEL_PROJECT) == model.project:
+                if (volume.get("Labels") or {}).get(LABEL_PROJECT) == project:
                     await self.client.async_volume_remove(volume["Name"])

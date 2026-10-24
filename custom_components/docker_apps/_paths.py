@@ -7,6 +7,7 @@ container. Outside a container, paths are used as they are.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 from pathlib import PurePosixPath
@@ -71,6 +72,11 @@ def copy_file(source: str, target: str) -> bool:
         return False
     write_text(target, content, private=source.endswith(".env"))
     return True
+
+
+def remove_file(path: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(path)
 
 
 def remove_tree(path: str) -> None:

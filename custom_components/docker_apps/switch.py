@@ -6,11 +6,8 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from ._docker_client import DockerError
-from .apps import AppError
 from .coordinator import DockerAppsConfigEntry
 from .entity import AppEntity, async_add_app_entities
 
@@ -39,17 +36,8 @@ class AppPowerSwitch(AppEntity, SwitchEntity):
     def is_on(self) -> bool:
         return any(c.running for c in self.docker_data.app_containers(self.app_key))
 
-    async def _action(self, action: str) -> None:
-        try:
-            await self.runtime.manager.async_app_action(
-                self.app_key, self.docker_data, action
-            )
-        except (AppError, DockerError) as err:
-            raise HomeAssistantError(str(err)) from err
-        await self.coordinator.async_refresh()
-
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._action("start")
+        await self._async_app_action("start")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._action("stop")
+        await self._async_app_action("stop")

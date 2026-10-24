@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -39,7 +40,11 @@ class DockerAppsRuntime:
     stats: StatsCoordinator
     disk: DiskCoordinator
     updates: UpdatesCoordinator
-    read_only: bool = False
+    read_only: bool
+    # options at setup, so the update listener can tell options from repositories
+    options: dict
+    # called with the key of an app whose device was removed
+    app_removed: list[Callable[[str], None]] = field(default_factory=list)
 
 
 type DockerAppsConfigEntry = ConfigEntry[DockerAppsRuntime]
@@ -98,7 +103,10 @@ class DockerCoordinator(DataUpdateCoordinator[DockerData]):
     def _handle_event(self, event: dict) -> None:
         action = event.get("Action") or event.get("status") or ""
         attributes = (event.get("Actor") or {}).get("Attributes") or {}
-        if attributes.get(LABEL_HELPER):
+        # health checks run `exec` every interval; they change nothing to show
+        if attributes.get(LABEL_HELPER) or action.startswith(
+            ("exec_", "top", "attach", "resize")
+        ):
             return
         self._details.pop((event.get("Actor") or {}).get("ID", ""), None)
         if action in FORWARDED_EVENTS:
@@ -116,8 +124,7 @@ class DockerCoordinator(DataUpdateCoordinator[DockerData]):
                     "exit_code": attributes.get("exitCode"),
                 },
             )
-        if not action.startswith(("exec_", "top", "attach", "resize")):
-            self.hass.async_create_task(self.async_request_refresh())
+        self.hass.async_create_task(self.async_request_refresh())
 
 
 class StatsCoordinator(DataUpdateCoordinator[dict[str, ContainerStats]]):
@@ -134,10 +141,7 @@ class StatsCoordinator(DataUpdateCoordinator[dict[str, ContainerStats]]):
         self._semaphore = asyncio.Semaphore(8)
 
     async def _async_update_data(self) -> dict[str, ContainerStats]:
-        data = self.docker.data
-        if data is None:
-            return {}
-        running = [c for c in data.containers.values() if c.running]
+        running = [c for c in self.docker.data.containers.values() if c.running]
 
         async def one(container):
             async with self._semaphore:
@@ -192,14 +196,19 @@ class UpdatesCoordinator(DataUpdateCoordinator[dict[str, AppUpdate]]):
         self.manager = manager
         self.catalog = catalog
         self.docker = docker
-        self.refresh_catalog = True
+        self._on_hold: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, AppUpdate]:
-        if self.refresh_catalog:
+        return await self._async_check(refresh_catalog=True)
+
+    async def async_check_now(self, refresh_catalog: bool = False) -> None:
+        if refresh_catalog:
+            self.manager.registry.clear_cache()
+        self.async_set_updated_data(await self._async_check(refresh_catalog))
+
+    async def _async_check(self, refresh_catalog: bool) -> dict[str, AppUpdate]:
+        if refresh_catalog:
             await self.catalog.async_refresh()
-        self.refresh_catalog = True
-        if self.docker.data is None:
-            return {}
         results = await self.manager.async_check_updates(
             self.docker.data, self.catalog.apps
         )
@@ -208,23 +217,21 @@ class UpdatesCoordinator(DataUpdateCoordinator[dict[str, AppUpdate]]):
 
     def _sync_hold_issues(self, results: dict[str, AppUpdate]) -> None:
         """One repair issue per app whose update waits for a manual database upgrade."""
-        for app_key, update in results.items():
-            issue_id = f"update_on_hold_{app_key}"
-            if update.blocked:
-                ir.async_create_issue(
-                    self.hass,
-                    DOMAIN,
-                    issue_id,
-                    is_fixable=False,
-                    severity=ir.IssueSeverity.WARNING,
-                    translation_key="update_on_hold",
-                    translation_placeholders={"app": app_key, "reason": update.blocked},
-                )
-            else:
-                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
-
-    async def async_check_now(self, refresh_catalog: bool = False) -> None:
-        self.refresh_catalog = refresh_catalog
-        if refresh_catalog:
-            self.manager.registry.clear_cache()
-        await self.async_refresh()
+        on_hold = {key for key, update in results.items() if update.blocked}
+        for app_key in on_hold:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"update_on_hold_{app_key}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="update_on_hold",
+                translation_placeholders={
+                    "app": app_key,
+                    "reason": results[app_key].blocked,
+                },
+            )
+        # also for apps that are no longer managed or installed
+        for app_key in self._on_hold - on_hold:
+            ir.async_delete_issue(self.hass, DOMAIN, f"update_on_hold_{app_key}")
+        self._on_hold = on_hold

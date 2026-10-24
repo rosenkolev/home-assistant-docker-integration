@@ -139,7 +139,10 @@ class DockerClient:
         async with response:
             if response.status == 204:
                 return None
-            text = await response.text()
+            try:
+                text = await response.text()
+            except (TimeoutError, aiohttp.ClientError) as err:
+                raise DockerConnectionError(f"{method} {path}: {err}") from err
             return json.loads(text) if text else None
 
     # --- system ---
@@ -500,6 +503,16 @@ def build_docker_data(info: dict, containers: list[dict]) -> DockerData:
             health=health_from_status(status),
             ports=ports,
             labels=labels,
+            mounts=[
+                {
+                    "type": m.get("Type"),
+                    "source": m.get("Source"),
+                    "name": m.get("Name"),
+                    "target": m.get("Destination"),
+                    "read_only": not m.get("RW", True),
+                }
+                for m in raw.get("Mounts") or []
+            ],
         )
 
         app = apps.get(app_key)

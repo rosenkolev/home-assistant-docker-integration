@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import yaml
+from ._compose import untag, load_yaml
 
 # one variable in a tag, with optional fixed text around it: `${VERSION:-release}-rknn`
 _VAR = re.compile(
@@ -30,7 +30,7 @@ class ImageEdit:
 
 
 def parse_services(text: str) -> dict[str, dict]:
-    data = yaml.safe_load(text) or {}
+    data = untag(load_yaml(text) or {})
     services = data.get("services") or {}
     return {k: v or {} for k, v in services.items() if isinstance(v, dict)}
 

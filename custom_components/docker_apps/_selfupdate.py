@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from ._compose import (
     LABEL_CONFIG_HASH,
     ComposeEngine,
+    ComposeError,
     build_container_config,
     load_model,
 )
@@ -44,18 +45,14 @@ async def async_start_self_update(
     """Start the one-shot updater when the Home Assistant container must change."""
     inspect = manager.self_inspect
     if inspect is None:
-        raise RuntimeError("the Home Assistant container can't be inspected")
+        raise ComposeError("the Home Assistant container can't be inspected")
 
     config = build_container_config(model, service)
-    image = await manager.client.async_image_inspect(config["Image"])
-    if image is None:
-        async for _ in manager.client.async_image_pull(config["Image"]):
-            pass
-        image = await manager.client.async_image_inspect(config["Image"])
+    image_id = await manager.engine.async_image_id(config["Image"])
     labels = (inspect.get("Config") or {}).get("Labels") or {}
     if (
         labels.get(LABEL_CONFIG_HASH) == config["Labels"][LABEL_CONFIG_HASH]
-        and inspect.get("Image") == image["Id"]
+        and inspect.get("Image") == image_id
     ):
         return False
 

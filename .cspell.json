@@ -38,6 +38,7 @@
     "Runtipi",
     "selfupdate",
     "systempaths",
+    "tmpfs",
     "traefik",
     "valkey",
     "vectorchord",

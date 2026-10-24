@@ -24,8 +24,6 @@ APP_STATES = ["running", "partial", "starting", "unhealthy", "stopped", "updatin
 def app_status(containers, busy: str | None) -> str:
     if busy:
         return "updating"
-    if not containers:
-        return "stopped"
     running = [c for c in containers if c.running]
     if not running:
         return "stopped"

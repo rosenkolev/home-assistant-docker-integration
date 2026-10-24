@@ -11,7 +11,7 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentryFlow,
-    OptionsFlowWithReload,
+    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.core import callback
@@ -112,8 +112,6 @@ class DockerAppsConfigFlow(ConfigFlow, domain=DOMAIN):
         return {SUBENTRY_REPOSITORY: RepositorySubentryFlow}
 
     async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
-        if self._async_current_entries():
-            return self.async_abort(reason="single_instance_allowed")
         errors = {}
         if user_input is not None:
             client = DockerClient(user_input[CONF_DOCKER_URL])
@@ -158,7 +156,9 @@ class DockerAppsConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class DockerAppsOptionsFlow(OptionsFlowWithReload):
+class DockerAppsOptionsFlow(OptionsFlow):
+    """Options; the entry update listener reloads when they change."""
+
     async def async_step_init(self, user_input: dict | None = None) -> ConfigFlowResult:
         entry = self.config_entry
         current = {**entry.data, **entry.options}
@@ -222,7 +222,10 @@ class RepositorySubentryFlow(ConfigSubentryFlow):
             if kind not in KINDS:
                 errors[CONF_REPO_KIND] = "unknown_kind"
             else:
-                name = KNOWN_REPOSITORIES.get(url, (kind, url.rsplit("/", 1)[-1]))[1]
+                if url in KNOWN_REPOSITORIES:
+                    name = KNOWN_REPOSITORIES[url][1]
+                else:
+                    name = url.rsplit("/", 1)[-1]
                 repository = Repository(url=url, kind=kind, name=name)
                 try:
                     apps, _ = await async_fetch_repository(

@@ -8,28 +8,42 @@ import asyncio
 import json
 import re
 import socket
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 import yaml
+from aiohttp import ClientError
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from ._compose import (
     ComposeEngine,
+    ComposeDumper,
     ComposeError,
     ComposeModel,
     as_mapping,
     interpolate,
     load_model,
+    load_yaml,
+    is_bind_source,
+    split_volume,
+    untag,
 )
 from ._compose_file import parse_services, update_service_tag
 from ._docker_client import DockerClient, DockerError, health_from_status
 from ._models import LABEL_PROJECT, LABEL_SERVICE, AppInfo, DockerData, split_image
-from ._paths import PathMap, copy_file, read_text, remove_tree, write_text
+from ._paths import (
+    PathMap,
+    copy_file,
+    read_text,
+    remove_file,
+    remove_tree,
+    write_text,
+)
 from ._registry import RegistryClient, RegistryError
 from ._store import StoreApp, format_env, published_ports, render_app, safe_id
 from ._versions import is_floating, newest_tag, parse_tag, short_digest
@@ -58,6 +72,9 @@ DATABASE_IMAGES = (
 CACHE_IMAGES = ("redis", "valkey", "memcached", "keydb", "dragonfly")
 DEFAULT_UNTRACKED = DATABASE_IMAGES + CACHE_IMAGES
 PRIMARY_HINTS = ("server", "app", "web", "main")
+# host paths that are never offered or mounted as app folders
+SYSTEM_PATHS = ("/proc", "/sys", "/dev", "/run", "/var/run", "/var/lib", "/etc")
+VOLUMES_CACHE_SECONDS = 60
 OWN_CONTAINER = re.compile(r"/containers/([0-9a-f]{64})/hostname ")
 
 
@@ -96,6 +113,11 @@ class AppUpdate:
         return [s for s in self.services if s.has_update and (s.tracked or s.required)]
 
     @property
+    def kept(self) -> list[ServiceUpdate]:
+        """Untracked services that the update leaves as they are."""
+        return [s for s in self.services if not s.tracked and not s.required]
+
+    @property
     def has_update(self) -> bool:
         if self.store_app is not None:
             return self.latest_version != self.installed_version
@@ -126,6 +148,11 @@ class AppSettings:
     store: dict | None = None
     history: list[dict] = field(default_factory=list)
 
+    @property
+    def store_app_id(self) -> str | None:
+        """Id of the store app this app was installed from."""
+        return f"{self.store['repo_id']}.{self.store['app_id']}" if self.store else None
+
 
 def image_name(image: str) -> str:
     return split_image(image)[0].rsplit("/", 1)[-1].lower()
@@ -152,6 +179,76 @@ def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str | None:
     except OSError:
         return None
     return match[1] if match else None
+
+
+def system_path(path: str | None) -> bool:
+    """Host paths that are not app data: /proc, /dev, the Docker socket, ..."""
+    return (
+        not path
+        or path == "/"
+        or path.endswith(".sock")
+        or path.startswith(SYSTEM_PATHS)
+    )
+
+
+def mount_entry(volume, model: ComposeModel) -> dict | None:
+    """{type, source, target, read_only} of a compose volume; None for tmpfs."""
+    if isinstance(volume, dict):
+        kind = volume.get("type", "volume")
+        if kind == "tmpfs":
+            return None
+        source, target = volume.get("source"), volume.get("target")
+        read_only = bool(volume.get("read_only"))
+    else:
+        source, target, mode = split_volume(volume)
+        read_only = "ro" in mode.split(",")
+        if source is None:  # anonymous volume
+            return {
+                "type": "volume",
+                "source": None,
+                "target": target,
+                "read_only": False,
+            }
+        kind = "bind" if is_bind_source(source) else "volume"
+    if kind == "bind" and source:
+        source = model.resolve(source)
+    return {"type": kind, "source": source, "target": target, "read_only": read_only}
+
+
+def mount_text(mount: dict) -> str:
+    """A mount as a short compose volume: `source:target[:ro]`."""
+    if not mount["source"]:
+        return mount["target"]
+    suffix = ":ro" if mount["read_only"] else ""
+    return f"{mount['source']}:{mount['target']}{suffix}"
+
+
+def check_mount(mount: dict) -> None:
+    """Refuse mounts that can't work or would hand over the host."""
+    target, source = mount["target"], mount["source"]
+    if not target.startswith("/") or target == "/":
+        raise AppError(f"the path in the app must be absolute, not '{target}'")
+    if source is None:
+        return
+    if source.startswith("/"):
+        if system_path(source):
+            raise AppError(f"{source} can't be mounted into an app")
+    elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", source):
+        raise AppError(f"'{source}' is not a folder path or a Docker volume name")
+
+
+def published_host_ports(data: DockerData) -> set[int]:
+    """Host ports that containers publish."""
+    return {
+        int(port.split(":", 1)[0])
+        for container in data.containers.values()
+        for port in container.ports
+    }
+
+
+def first_free_port(candidates: list[int]) -> int | None:
+    """The first candidate nothing on this host listens on."""
+    return next((port for port in candidates if not host_ports_in_use({port})), None)
 
 
 def host_ports_in_use(ports: set[int]) -> set[int]:
@@ -221,6 +318,7 @@ class AppManager:
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.apps")
         self._listeners: list[Callable[[], None]] = []
         self._locks: dict[str, asyncio.Lock] = {}
+        self._volumes_cache: tuple[list[dict], float] | None = None
 
     # --- state ---
 
@@ -289,6 +387,21 @@ class AppManager:
             for s, i in images.items()
         }
 
+    def display_name(self, app: AppInfo) -> str:
+        return (self.get(app.key).store or {}).get("name") or app.name
+
+    def display_version(self, app: AppInfo, data: DockerData) -> str | None:
+        """The store version, else the image version of the main container."""
+        store = self.get(app.key).store or {}
+        if store.get("version"):
+            return store["version"]
+        containers = data.app_containers(app.key)
+        main = next(
+            (c for c in containers if c.service == store.get("main_service")),
+            containers[0] if containers else None,
+        )
+        return main.image_version if main else None
+
     def history_versions(self, app_key: str) -> list[str]:
         return [h["version"] for h in self.get(app_key).history if h.get("version")]
 
@@ -349,11 +462,19 @@ class AppManager:
         def load() -> ComposeModel:
             contents = {}
             for file in app.config_files:
-                text = overrides.get(file) or read_text(self.local_path(file))
+                text = (
+                    overrides[file]
+                    if file in overrides
+                    else read_text(self.local_path(file))
+                )
                 if text is None:
                     raise AppError(f"{file} not found")
                 contents[file] = text
-            env_text = overrides.get(env_file) or read_text(self.local_path(env_file))
+            env_text = (
+                overrides[env_file]
+                if env_file in overrides
+                else read_text(self.local_path(env_file))
+            )
             return load_model(
                 app.project,
                 app.working_dir,
@@ -377,7 +498,8 @@ class AppManager:
                 continue
             try:
                 results[app_key] = await self._async_check_app(app_key, data, catalog)
-            except (RegistryError, DockerError, OSError, ValueError) as err:
+            except (RegistryError, DockerError, OSError, ValueError, re.error) as err:
+                # a bad tag filter of one app doesn't stop the others
                 _LOGGER.warning("Update check for %s failed: %s", app_key, err)
                 results[app_key] = AppUpdate(app_key, None, None, error=str(err))
         return results
@@ -387,7 +509,7 @@ class AppManager:
     ) -> AppUpdate:
         settings = self.get(app_key)
         if store := settings.store:
-            store_app = catalog.get(f"{store['repo_id']}.{store['app_id']}")
+            store_app = catalog.get(settings.store_app_id)
             installed = store.get("version") or store.get("package_version")
             latest = installed
             if store_app and store_app.is_newer_than(
@@ -403,7 +525,13 @@ class AppManager:
         for service, (image, tracked) in self.service_images(app_key, data).items():
             try:
                 result = await self._async_check_service(service, image, settings)
-            except (RegistryError, DockerError, ValueError) as err:
+            except (
+                RegistryError,
+                DockerError,
+                ValueError,
+                OSError,
+                ClientError,
+            ) as err:
                 # one image that can't be checked doesn't hide the others
                 _LOGGER.debug(
                     "Update check for %s/%s failed: %s", app_key, service, err
@@ -680,11 +808,8 @@ class AppManager:
         deadline = loop.time() + HEALTH_TIMEOUT
         while True:
             waiting = []
-            for raw in await self.client.async_containers(all=True):
-                labels = raw.get("Labels") or {}
-                if labels.get(LABEL_PROJECT) != project:
-                    continue
-                service = labels.get(LABEL_SERVICE)
+            for raw in await self.engine.project_containers(project):
+                service = (raw.get("Labels") or {}).get(LABEL_SERVICE)
                 status = raw.get("Status", "")
                 health = health_from_status(status)
                 if health == "unhealthy":
@@ -707,11 +832,11 @@ class AppManager:
         store: dict | None = None,
     ) -> dict:
         """Copy the files into the app history; keeps the newest HISTORY_KEEP."""
-        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        now = datetime.now(UTC)
         safe = "".join(
             c if c.isalnum() or c in ".-_" else "_" for c in (version or "unknown")
         )
-        folder = f"{app.working_dir}/{META_DIR}/history/{stamp}-{safe}"
+        folder = f"{app.working_dir}/{META_DIR}/history/{now:%Y%m%d%H%M%S}-{safe}"
 
         def backup() -> list[str]:
             return [
@@ -726,7 +851,7 @@ class AppManager:
         entry = {
             "version": version,
             "dir": folder,
-            "time": datetime.now(UTC).isoformat(),
+            "time": now.isoformat(),
             "files": await self.hass.async_add_executor_job(backup),
             "store": store,
         }
@@ -784,28 +909,182 @@ class AppManager:
     async def async_set_environment(
         self, app: AppInfo, service: str, values: dict[str, str], data: DockerData
     ) -> None:
-        """Change environment variables in compose.override.yaml and recreate.
+        """Change environment variables of a service and recreate it."""
 
-        The override keeps the change across package updates. Comments in it are
-        not kept, except the header.
-        """
-        path = self.override_path(app)
-        if path is None:
-            raise AppError(f"{app.key} has no {OVERRIDE_FILE} to keep changes in")
-        async with self._operation(app.key, "update"):
-            original = await self._read(path)
-            override = yaml.safe_load(original or "") or {}
-            override["services"] = override.get("services") or {}
-            spec = override["services"].get(service) or {}
+        def change(spec: dict, _override: dict) -> None:
             environment = as_mapping(spec.get("environment"))
             # a literal `$` would start a variable in compose
             environment.update(
                 {key: str(value).replace("$", "$$") for key, value in values.items()}
             )
             spec["environment"] = environment
-            override["services"][service] = spec
-            content = OVERRIDE_HEADER + yaml.safe_dump(
-                override, sort_keys=False, allow_unicode=True
+
+        await self._async_edit_override(app, service, change, data)
+
+    async def async_volumes(self, app: AppInfo) -> dict:
+        """Mounts of each service (`yours` marks the ones from compose.override.yaml)
+        and the folder each service keeps its work in."""
+        model = await self.async_load_model(app)
+        path = self.override_path(app)
+        override = untag(load_yaml(await self._read(path) or "") or {}) if path else {}
+        yours = {
+            name: {
+                entry["target"]
+                for volume in (spec or {}).get("volumes") or []
+                if (entry := mount_entry(volume, model))
+            }
+            for name, spec in (override.get("services") or {}).items()
+        }
+        return {
+            "services": {
+                name: [
+                    {**entry, "yours": entry["target"] in yours.get(name, set())}
+                    for volume in service.get("volumes") or []
+                    if (entry := mount_entry(volume, model))
+                ]
+                for name, service in model.services.items()
+            },
+            # where new folders go by default (code-server and the like set one)
+            "workspaces": {
+                name: as_mapping(service.get("environment")).get("DEFAULT_WORKSPACE")
+                for name, service in model.services.items()
+            },
+        }
+
+    async def async_set_volumes(
+        self, app: AppInfo, service: str, mounts: list[dict], data: DockerData
+    ) -> None:
+        """Set all mounts of a service and recreate it.
+
+        Mounts that differ from the app's compose files go to compose.override.yaml.
+        The app's own mounts stay: without them the app can lose its data.
+        """
+        path = self.override_path(app)
+        if path is None:
+            raise AppError(f"{app.key} has no {OVERRIDE_FILE} to keep changes in")
+        base = await self.async_load_model(
+            replace(app, config_files=[f for f in app.config_files if f != path])
+        )
+        if service not in base.services:
+            raise AppError(f"service {service} not found in {app.key}")
+        current = {
+            entry["target"]: (entry["source"], entry["read_only"])
+            for volume in base.services[service].get("volumes") or []
+            if (entry := mount_entry(volume, base))
+        }
+        wanted = [
+            {
+                "source": str(m.get("source") or "").strip() or None,
+                "target": str(m.get("target") or "").strip(),
+                "read_only": bool(m.get("read_only")),
+            }
+            for m in mounts
+        ]
+        targets = [m["target"] for m in wanted]
+        if len(set(targets)) != len(targets):
+            raise AppError("each path in the app can be used only once")
+        changed = [
+            m
+            for m in wanted
+            if current.get(m["target"]) != (m["source"], m["read_only"])
+        ]
+        for mount in changed:
+            check_mount(mount)
+        if missing := sorted(set(current) - set(targets)):
+            raise AppError(
+                f"folders that come with the app can't be removed: {', '.join(missing)}"
+            )
+        external = sorted(
+            {
+                m["source"]
+                for m in changed
+                if m["source"]
+                and not m["source"].startswith("/")
+                and m["source"] not in base.volumes
+            }
+        )
+
+        def change(spec: dict, override: dict) -> None:
+            if changed:
+                spec["volumes"] = [mount_text(m) for m in changed]
+            else:
+                spec.pop("volumes", None)
+            if external:
+                volumes = override.get("volumes") or {}
+                for name in external:
+                    volumes[name] = {"external": True}
+                override["volumes"] = volumes
+
+        await self._async_edit_override(app, service, change, data)
+
+    async def async_volume_suggestions(self, data: DockerData) -> dict:
+        """Folders and volumes to offer when adding a mount to an app.
+
+        The folders of Home Assistant and of other containers come from data that
+        is already known; the Docker volume list is cached for a minute.
+        """
+        if self._volumes_cache is None or self._volumes_cache[1] < time.monotonic():
+            self._volumes_cache = (
+                await self.client.async_volumes(),
+                time.monotonic() + VOLUMES_CACHE_SECONDS,
+            )
+        apps: dict[str, dict[str, str]] = {}
+        for container in data.containers.values():
+            if container.id == self.self_container_id:
+                continue  # listed as the Home Assistant folders already
+            for mount in container.mounts:
+                if mount["type"] == "bind" and not system_path(mount["source"]):
+                    apps.setdefault(container.app_key, {})[mount["source"]] = mount[
+                        "target"
+                    ]
+        return {
+            "home_assistant": [
+                {"source": source, "target": target}
+                for source, target in self.paths.mounts
+                if not system_path(source)
+            ],
+            "volumes": sorted(
+                (
+                    {
+                        "source": volume["Name"],
+                        "app": (volume.get("Labels") or {}).get(LABEL_PROJECT),
+                    }
+                    for volume in self._volumes_cache[0]
+                    # anonymous volumes have long random names
+                    if not re.fullmatch(r"[0-9a-f]{64}", volume["Name"])
+                ),
+                key=lambda v: v["source"],
+            ),
+            "apps": {
+                key: [{"source": s, "target": t} for s, t in sorted(mounts.items())]
+                for key, mounts in sorted(apps.items())
+            },
+        }
+
+    async def _async_edit_override(
+        self,
+        app: AppInfo,
+        service: str,
+        change: Callable[[dict, dict], None],
+        data: DockerData,
+    ) -> None:
+        """Change the service spec in compose.override.yaml and recreate; put the
+        file back when that fails.
+
+        The override keeps changes across package updates. Its comments are not
+        kept, except the header.
+        """
+        path = self.override_path(app)
+        if path is None:
+            raise AppError(f"{app.key} has no {OVERRIDE_FILE} to keep changes in")
+        async with self._operation(app.key, "update"):
+            original = await self._read(path)
+            override = load_yaml(original or "") or {}
+            services = override["services"] = override.get("services") or {}
+            spec = services[service] = services.get(service) or {}
+            change(spec, override)
+            content = OVERRIDE_HEADER + yaml.dump(
+                override, Dumper=ComposeDumper, sort_keys=False, allow_unicode=True
             )
             model = await self.async_load_model(app, overrides={path: content})
             if service not in model.services:
@@ -814,11 +1093,18 @@ class AppManager:
             try:
                 await self._async_apply(app.key, model, data, pull=False)
             except (ComposeError, DockerError, AppError):
-                if original is not None:
-                    await self._write(path, original)
-                await self._async_apply(
-                    app.key, await self.async_load_model(app), data, pull=False
-                )
+                try:
+                    if original is None:
+                        await self.hass.async_add_executor_job(
+                            remove_file, self.local_path(path)
+                        )
+                    else:
+                        await self._write(path, original)
+                    await self._async_apply(
+                        app.key, await self.async_load_model(app), data, pull=False
+                    )
+                except (ComposeError, DockerError, AppError, OSError) as err:
+                    _LOGGER.error("%s can't be put back as it was: %s", app.key, err)
                 raise
 
     # --- store ---
@@ -835,33 +1121,11 @@ class AppManager:
         data: DockerData | None = None,
     ) -> str:
         """Install a store app, or install the new package of an installed one."""
-        app_key = safe_id(app_key or store_app.name)
-        settings = self.settings.get(app_key)
-        installed = settings.store if settings else None
-        if is_update and installed is None:
-            raise AppError(f"{app_key} was not installed from a store")
-        if not is_update and (installed or (data and app_key in data.apps)):
-            raise AppError(f"an app named {app_key} already exists")
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
-
-        app_dir, data_dir = self.store_paths(app_key)
+        app_key = safe_id(app_key or store_app.name)
+        app_dir, _ = self.store_paths(app_key)
         self.local_path(app_dir)  # fail early when not mounted
-        compose, env = self._render(
-            store_app,
-            app_key,
-            {**((installed or {}).get("values") or {}), **(values or {})},
-        )
-        if app_key in self.installing:
-            raise AppError(f"{app_key} is being installed")
-        if data is not None and not is_update:
-            wanted = published_ports(interpolate(compose, env))
-            if conflicts := await self._async_ports_in_use(wanted, data):
-                raise AppError(
-                    f"ports already in use: {', '.join(map(str, sorted(conflicts)))}. "
-                    "Choose another port."
-                )
-
         compose_path = f"{app_dir}/compose.yaml"
         override_path = f"{app_dir}/{OVERRIDE_FILE}"
         env_path = f"{app_dir}/.env"
@@ -873,9 +1137,29 @@ class AppManager:
             config_files=[compose_path, override_path],
         )
 
+        # the app lock makes two installs of the same name wait for each other
         async with self._operation(app_key, "update" if is_update else "install"):
+            installed = self.get(app_key).store
+            if is_update and installed is None:
+                raise AppError(f"{app_key} was not installed from a store")
+            if not is_update and (installed or (data and app_key in data.apps)):
+                raise AppError(f"an app named {app_key} already exists")
+            # values chosen at install time (a web port, secrets) stay on updates
+            values = {**((installed or {}).get("values") or {}), **(values or {})}
+            compose, env = self._render(store_app, app_key, values)
+            if data is not None and not is_update:
+                wanted = published_ports(interpolate(compose, env))
+                if conflicts := await self._async_ports_in_use(
+                    wanted, published_host_ports(data)
+                ):
+                    raise AppError(
+                        f"ports already in use: {', '.join(map(str, sorted(conflicts)))}. "
+                        "Choose another port."
+                    )
+
+            backup = None
             if installed:
-                await self._async_backup(
+                backup = await self._async_backup(
                     app,
                     [compose_path, env_path],
                     installed.get("version"),
@@ -896,11 +1180,13 @@ class AppManager:
                     )
                 model = await self.async_load_model(app)
                 await self._async_apply(app_key, model, data, pull=True)
-            except (AppError, ComposeError, DockerError, OSError):
-                if not installed:
+            except (AppError, ComposeError, DockerError, OSError) as err:
+                if backup is None:
                     # a failed first install leaves nothing behind, so it can be retried
                     await self._async_discard_install(app_key, app_dir)
-                raise
+                    raise
+                await self._async_restore(app, backup, data)
+                raise AppError(f"update failed and was rolled back: {err}") from err
             finally:
                 self.installing.pop(app_key, None)
 
@@ -914,10 +1200,9 @@ class AppManager:
                 "version": store_app.version or store_app.package_version,
                 "package_version": store_app.package_version,
                 "content_hash": store_app.content_hash,
-                "values": {v.key: env[v.key] for v in store_app.variables}
-                | (values or {}),
+                "values": {v.key: env[v.key] for v in store_app.variables} | values,
                 "main_service": store_app.main_service,
-                "web_port": (values or {}).get("APP_PORT") or store_app.web_port,
+                "web_port": values.get("APP_PORT") or store_app.web_port,
                 "web_path": store_app.web_path,
                 "web_target": store_app.web_target,
                 "web_scheme": store_app.web_scheme,
@@ -941,17 +1226,14 @@ class AppManager:
             },
         )
 
-    async def _async_ports_in_use(self, ports: set[int], data: DockerData) -> set[int]:
+    async def _async_ports_in_use(
+        self, ports: set[int], published: set[int]
+    ) -> set[int]:
         """The ports that containers publish, or that the host already listens on."""
-        used = {
-            int(port.split(":", 1)[0])
-            for container in data.containers.values()
-            for port in container.ports
-        }
-        busy = ports & used
+        busy = ports & published
         if self.host_network:
             busy |= await self.hass.async_add_executor_job(
-                host_ports_in_use, ports - used
+                host_ports_in_use, ports - published
             )
         return busy
 
@@ -969,16 +1251,23 @@ class AppManager:
         values = {"APP_PORT": str(web)} if web else {}
         compose, env = self._render(store_app, safe_id(store_app.name), values)
         wanted = published_ports(interpolate(compose, env))
-        busy = await self._async_ports_in_use(wanted, data)
+        published = published_host_ports(data)
+        busy = await self._async_ports_in_use(wanted, published)
         free = web
         if web and web in busy:
-            fixed = wanted - {web}
-            for candidate in range(web + 1, min(web + 200, 65536)):
-                if candidate not in fixed and not await self._async_ports_in_use(
-                    {candidate}, data
-                ):
-                    free = candidate
-                    break
+            taken = (wanted - {web}) | published
+            candidates = [
+                port
+                for port in range(web + 1, min(web + 200, 65536))
+                if port not in taken
+            ]
+            if self.host_network:
+                free = await self.hass.async_add_executor_job(
+                    first_free_port, candidates
+                )
+            elif candidates:
+                free = candidates[0]
+            free = free or web
         return {
             "busy": sorted(busy - {web} if free != web else busy),
             "web_port": free,
@@ -989,8 +1278,7 @@ class AppManager:
     async def _async_discard_install(self, app_key: str, app_dir: str) -> None:
         """Remove the containers, networks and files of a failed first install."""
         try:
-            project = ComposeModel(app_key, app_dir, [], None, {}, {}, {})
-            await self.engine.async_down(project)
+            await self.engine.async_down(app_key)
             await self.hass.async_add_executor_job(
                 remove_tree, self.local_path(app_dir)
             )
@@ -1011,9 +1299,8 @@ class AppManager:
         )
         async with self._operation(app.key, "uninstall"):
             if app.is_compose and self.can_edit(app):
-                await self.engine.async_down(
-                    await self.async_load_model(app), remove_data
-                )
+                model = await self.async_load_model(app)
+                await self.engine.async_down(model.project, remove_data)
             else:
                 for container in data.app_containers(app.key):
                     await self.engine.async_remove(container.id, remove_data)
