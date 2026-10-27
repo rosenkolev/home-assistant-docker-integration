@@ -1,3 +1,4 @@
 * text=auto
 *.txt text
 *.py text
+*.sh text eol=lf
