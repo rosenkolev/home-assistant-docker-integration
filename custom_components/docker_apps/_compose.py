@@ -31,6 +31,7 @@ from ._models import (
     LABEL_PROJECT,
     LABEL_SERVICE,
     LABEL_WORKING_DIR,
+    NEW_SUFFIX,
 )
 from .const import _LOGGER
 
@@ -43,8 +44,6 @@ LABEL_DEPENDS_ON = "com.docker.compose.depends_on"
 ENGINE_VERSION = "docker-apps"
 HEALTH_TIMEOUT = 600
 SYSTEMPATHS_UNCONFINED = "systempaths=unconfined"
-# name of a new container until the old one is removed
-NEW_SUFFIX = "-docker-apps-new"
 
 _VAR = re.compile(
     r"\$(?:(?P<escaped>\$)|\{(?P<braced>[^}]+)\}|(?P<named>[A-Za-z_][A-Za-z0-9_]*))"
@@ -867,10 +866,22 @@ class ComposeEngine:
                 if service.get("pull_policy") not in ("never", "build")
             )
         )
-        for index, image in enumerate(images):
-            if progress:
-                progress(f"Pulling {image}", index / max(len(images), 1))
+        done = 0
+
+        async def pull(image: str) -> None:
+            nonlocal done
             await self.async_pull_image(image)
+            done += 1
+            if progress:
+                progress(f"Pulled {image}", done / len(images))
+
+        # images download side by side; containers are still created in order. All
+        # pulls end before an error is raised, so none is left running unwatched.
+        results = await asyncio.gather(
+            *(pull(image) for image in images), return_exceptions=True
+        )
+        if errors := [r for r in results if isinstance(r, BaseException)]:
+            raise errors[0]
 
     async def async_pull_image(self, image: str) -> None:
         async for _ in self.client.async_image_pull(image):

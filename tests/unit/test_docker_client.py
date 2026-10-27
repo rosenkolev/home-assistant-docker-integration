@@ -72,6 +72,19 @@ def test__build_docker_data_groups_by_project():
     assert not data.apps["pihole"].is_compose
 
 
+def test__new_container_of_an_update_is_shown_only_alone():
+    old = raw("immich_redis", "immich", "redis")
+    new = raw("immich-redis-1-docker-apps-new", "immich", "redis")
+    for order in ([old, new], [new, old]):
+        data = build_docker_data({}, order)
+        assert data.apps["immich"].container_keys == ["immich/redis"]
+        assert data.containers["immich/redis"].name == "immich_redis"
+
+    # the old one is gone already: the new one is the app
+    data = build_docker_data({}, [new])
+    assert data.apps["immich"].container_keys == ["immich/redis"]
+
+
 def test__container_key_numbers():
     labels = {
         "com.docker.compose.project": "p",
@@ -101,7 +114,7 @@ def test__parse_stats_cgroup_v2():
             },
         }
     )
-    assert stats.cpu_percent == 40.0
+    assert stats.cpu_percent == 10.0  # of all 4 cores
     assert stats.memory_usage == 400
 
 

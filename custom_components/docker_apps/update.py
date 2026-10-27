@@ -17,7 +17,8 @@ from .const import DOMAIN
 from .coordinator import DockerAppsConfigEntry
 from .entity import AppEntity, app_unique_id
 
-PARALLEL_UPDATES = 1
+# apps update side by side; the app lock keeps one operation per app
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(

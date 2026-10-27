@@ -5,13 +5,23 @@
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const STATUS = {
-  partial: "Partly running",
-  starting: "Starting",
-  unhealthy: "Unhealthy",
-  stopped: "Stopped",
-  updating: "Updating…",
+// states worth showing under an app; the text is the translated state of the status sensor
+const SHOWN_STATES = new Set(["partial", "starting", "unhealthy", "stopped", "updating"]);
+
+// the card's own texts; other languages fall back to English
+const TEXTS = {
+  en: { none: "No apps", open: "Open", title: "Title", show_stopped: "Show stopped apps", show_usage: "Show CPU and memory" },
+  // cspell:disable
+  bg: {
+    none: "Няма приложения",
+    open: "Отвори",
+    title: "Заглавие",
+    show_stopped: "Показвай спрените приложения",
+    show_usage: "Показвай процесор и памет",
+  },
+  // cspell:enable
 };
+const text = (hass, key) => (TEXTS[hass?.language] || TEXTS.en)[key];
 
 const STYLE = `
   .apps { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(var(--docker-app-width, 120px), 1fr)); }
@@ -33,7 +43,44 @@ const STYLE = `
   .empty { color: var(--secondary-text-color); padding: 8px 4px; }
 `;
 
-function appInfo(hass, status) {
+// "device|cpu" -> entity id of the app CPU and memory sensors; built again only when the
+// entity registry changes, since hass changes with every state of every entity
+let usageIndex = { entities: null, ids: {} };
+
+function usageSensors(hass) {
+  if (usageIndex.entities !== hass.entities) {
+    const ids = {};
+    for (const e of Object.values(hass.entities || {})) {
+      if (e.platform === "docker_apps" && (e.translation_key === "cpu" || e.translation_key === "memory")) {
+        ids[`${e.device_id}|${e.translation_key}`] = e.entity_id;
+      }
+    }
+    usageIndex = { entities: hass.entities, ids };
+  }
+  return usageIndex.ids;
+}
+
+function usageState(hass, device, key) {
+  const state = hass.states[usageSensors(hass)[`${device}|${key}`]];
+  return state && !Number.isNaN(Number(state.state)) ? state : null;
+}
+
+function usage(hass, device) {
+  const cpu = usageState(hass, device, "cpu");
+  const memory = usageState(hass, device, "memory");
+  const parts = [];
+  if (cpu) parts.push(`CPU ${Math.round(Number(cpu.state))}%`);
+  if (memory) parts.push(hass.formatEntityState?.(memory) ?? `${memory.state} ${memory.attributes.unit_of_measurement || ""}`);
+  return parts.join(" · ");
+}
+
+// the line under the name: a state worth knowing (stopped, updating, ...) comes before the usage
+function appLine(hass, status, device, showUsage) {
+  if (SHOWN_STATES.has(status.state)) return hass.formatEntityState?.(status) ?? status.state;
+  return showUsage ? usage(hass, device) : "";
+}
+
+function appInfo(hass, status, showUsage) {
   const device = hass.entities?.[status.entity_id]?.device_id;
   const { docker_app: key, entity_picture: picture, web_port: port, web_path: path, web_scheme: scheme } = status.attributes;
   return {
@@ -41,6 +88,7 @@ function appInfo(hass, status) {
     name: hass.devices?.[device]?.name_by_user || hass.devices?.[device]?.name || key,
     picture,
     state: status.state,
+    line: appLine(hass, status, device, showUsage),
     url: port ? `${scheme || "http"}://${location.hostname}:${port}${path}` : null,
   };
 }
@@ -48,34 +96,42 @@ function appInfo(hass, status) {
 const STATE_CLASS = { stopped: "off", unhealthy: "bad" };
 
 // a link to the web UI; an app without one is a button that opens its more-info dialog
-function renderApp(app) {
+function renderApp(app, open) {
   const icon = app.picture ? `<img src="${esc(app.picture)}" alt="">` : `<ha-icon icon="mdi:docker"></ha-icon>`;
-  const status = STATUS[app.state];
   const body = `<div class="bubble">${icon}</div>
       <div class="name">${esc(app.name)}</div>
-      ${status ? `<div class="status">${esc(status)}</div>` : ""}`;
+      ${app.line ? `<div class="status">${esc(app.line)}</div>` : ""}`;
   const cls = `app ${STATE_CLASS[app.state] || ""}`;
   return app.url
-    ? `<a class="${cls}" href="${esc(app.url)}" target="_blank" rel="noopener" title="${esc(`Open ${app.name}`)}">${body}</a>`
+    ? `<a class="${cls}" href="${esc(app.url)}" target="_blank" rel="noopener" title="${esc(`${open} ${app.name}`)}">${body}</a>`
     : `<button class="${cls}" data-id="${esc(app.id)}" title="${esc(app.name)}">${body}</button>`;
 }
 
+// status sensors of the apps that are in the launcher
+const launcherApps = (hass) => Object.values(hass.states).filter((s) => s.attributes.docker_app && s.attributes.launcher);
+
 class DockerAppsCard extends HTMLElement {
   static getStubConfig() {
-    return { title: "Apps" };
+    return { title: "Apps", show_stopped: true, show_usage: false };
+  }
+
+  static getConfigElement() {
+    return document.createElement("docker-apps-card-editor");
   }
 
   setConfig(config) {
     this._config = config || {};
     this._signature = null;
+    if (this._hass) this.hass = this._hass;
   }
 
   set hass(hass) {
     this._hass = hass;
-    const exclude = new Set(this._config.exclude || []);
-    const apps = Object.values(hass.states)
-      .filter((s) => s.attributes.docker_app && s.attributes.launcher && !exclude.has(s.attributes.docker_app))
-      .map((s) => appInfo(hass, s))
+    const { exclude = [], show_stopped: showStopped = true, show_usage: showUsage = false } = this._config;
+    const hidden = new Set(exclude);
+    const apps = launcherApps(hass)
+      .filter((s) => !hidden.has(s.attributes.docker_app) && (showStopped || s.state !== "stopped"))
+      .map((s) => appInfo(hass, s, showUsage))
       .sort((a, b) => a.name.localeCompare(b.name));
     const signature = JSON.stringify(apps);
     if (signature !== this._signature) {
@@ -91,7 +147,10 @@ class DockerAppsCard extends HTMLElement {
       this.shadowRoot.addEventListener("click", (ev) => this._moreInfo(ev));
     }
     const title = this._config.title ? `<div class="title">${esc(this._config.title)}</div>` : "";
-    const body = this._apps.length ? `<div class="apps">${this._apps.map(renderApp).join("")}</div>` : `<div class="empty">No apps</div>`;
+    const open = text(this._hass, "open");
+    const body = this._apps.length
+      ? `<div class="apps">${this._apps.map((app) => renderApp(app, open)).join("")}</div>`
+      : `<div class="empty">${text(this._hass, "none")}</div>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>${title}${body}`;
   }
 
@@ -109,8 +168,46 @@ class DockerAppsCard extends HTMLElement {
   }
 }
 
+const SCHEMA = [
+  { name: "title", selector: { text: {} } },
+  { name: "show_stopped", default: true, selector: { boolean: {} } },
+  { name: "show_usage", default: false, selector: { boolean: {} } },
+];
+
+// visual editor: Home Assistant's own form; which apps show is the
+// "Show in app launcher" option of each app
+class DockerAppsCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (first) this._render();
+    else if (this._form) this._form.hass = hass;
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._form) {
+      this._form = document.createElement("ha-form");
+      this._form.computeLabel = (field) => text(this._hass, field.name);
+      this._form.addEventListener("value-changed", (ev) => {
+        this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: ev.detail.value }, bubbles: true, composed: true }));
+      });
+      this.appendChild(this._form);
+    }
+    this._form.hass = this._hass;
+    this._form.schema = SCHEMA;
+    this._form.data = { show_stopped: true, show_usage: false, ...this._config };
+  }
+}
+
 // the frontend can load the module again after Home Assistant restarts
 if (!customElements.get("docker-apps-card")) customElements.define("docker-apps-card", DockerAppsCard);
+if (!customElements.get("docker-apps-card-editor")) customElements.define("docker-apps-card-editor", DockerAppsCardEditor);
 
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === "docker-apps-card")) {
