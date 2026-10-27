@@ -137,6 +137,7 @@ prune:
           translation_key: prune_kind
           options:
             - containers
+            - containers_apps
             - images
             - images_unused
             - volumes

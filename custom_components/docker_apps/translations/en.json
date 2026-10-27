@@ -77,7 +77,8 @@
     },
     "prune_kind": {
       "options": {
-        "containers": "Stopped containers",
+        "containers": "Stopped containers, except apps",
+        "containers_apps": "Stopped containers and apps",
         "images": "Dangling images",
         "images_unused": "All unused images",
         "volumes": "Unused volumes",

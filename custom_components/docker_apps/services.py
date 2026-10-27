@@ -33,7 +33,9 @@ MAX_TAIL = 5000
 
 # prune kind -> (Docker resource, filters)
 PRUNE = {
-    "containers": ("containers", None),
+    # stopped apps (compose projects) stay; containers_apps removes them too
+    "containers": ("containers", {"label!": ["com.docker.compose.project"]}),
+    "containers_apps": ("containers", None),
     "images": ("images", {"dangling": ["true"]}),
     "images_unused": ("images", {"dangling": ["false"]}),
     # Docker 23+ only prunes anonymous volumes unless all=true
@@ -173,10 +175,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         await runtime.docker.async_refresh()
 
     async def prune(call: ServiceCall) -> ServiceResponse:
-        runtime = writable_runtime()
+        entry, runtime = writable()
         # Docker refuses a second prune while one runs, so they wait for each other
         async with prune_lock:
-            return await _async_prune(runtime, call.data["kind"])
+            result = await _async_prune(runtime, call.data["kind"])
+        if call.data["kind"] == "containers_apps":
+            async_remove_stale_devices(hass, entry)
+        return result
 
     async def _async_prune(runtime: DockerAppsRuntime, kind: str) -> ServiceResponse:
         resource, filters = PRUNE[kind]

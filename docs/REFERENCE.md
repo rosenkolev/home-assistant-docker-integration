@@ -122,7 +122,7 @@ The card shows each app with **Show in app launcher** turned on (in the app menu
 | `docker_apps.skip_update` | Hide the update of untracked services until a newer version comes (skip a whole app with its update entity) |
 | `docker_apps.recreate` | Bring an app up again from its compose files (optionally pull first) |
 | `docker_apps.container_start` / `_stop` / `_restart` | Control one container |
-| `docker_apps.prune` | Remove stopped containers, dangling or unused images, unused volumes, networks or build cache |
+| `docker_apps.prune` | Remove stopped containers, dangling or unused images, unused volumes, networks or build cache. Stopped apps (compose projects) stay unless you choose `containers_apps`; their compose files stay, and store apps can be installed again. |
 | `docker_apps.check_updates` | Check for updates now (optionally refresh the repositories) |
 | `docker_apps.install` / `docker_apps.uninstall` | Install a store app, or remove an app |
 

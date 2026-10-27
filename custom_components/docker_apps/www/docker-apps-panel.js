@@ -811,18 +811,28 @@ class DockerAppsPanel extends HTMLElement {
             await this._call("update_services", { app, services: [service], tag }, true);
           }
           break;
-        case "prune":
-          if (await this._confirm("Remove unused resources?", `${esc(button.textContent)}. This can't be undone.`, "Remove", "primary danger")) {
-            this._pruning = kind;
-            this._renderMain();
-            try {
-              const result = await this._call("prune", { kind }, true);
-              this._toast(`Removed ${result?.removed ?? 0} items, freed ${bytes(result?.space_reclaimed)}`);
-            } finally {
-              this._pruning = null;
-            }
+        case "prune": {
+          const dialog = this._dialog(
+            "Remove unused resources?",
+            `<div class="text">${esc(button.textContent)}. This can't be undone.</div>
+             ${kind === "containers"
+               ? `<div class="muted hint">Stopped apps stay.</div>
+                  <label class="toggle"><input type="checkbox" id="prune-apps"> Also remove stopped apps</label>`
+               : ""}`,
+            footer("Remove", "yes", "primary danger"),
+          );
+          const pruneKind = await this._ask(dialog, () => (dialog.querySelector("#prune-apps")?.checked ? "containers_apps" : kind));
+          if (!pruneKind) break;
+          this._pruning = kind;
+          this._renderMain();
+          try {
+            const result = await this._call("prune", { kind: pruneKind }, true);
+            this._toast(`Removed ${result?.removed ?? 0} items, freed ${bytes(result?.space_reclaimed)}`);
+          } finally {
+            this._pruning = null;
           }
           break;
+        }
         case "install":
           await this._install(store);
           break;
