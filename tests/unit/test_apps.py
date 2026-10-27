@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._compose import load_model
+from custom_components.docker_apps._models import LABEL_PROJECT
 from custom_components.docker_apps._registry import RegistryError
 from custom_components.docker_apps.apps import AppError, AppManager, own_container_id
 from tests.fake_docker import FakeDocker, FakeRegistry
@@ -171,6 +172,21 @@ async def test__check_updates_only_for_managed_apps(setup):
     assert not redis.tracked and redis.latest == "8.1"
 
 
+async def test__skipped_untracked_version_is_hidden_until_a_newer_one(setup):
+    manager, _, data = setup
+    await manager.async_configure("immich", managed=True)
+    await manager.async_skip("immich", {"redis": "8.1"})
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    redis = next(s for s in update.services if s.service == "redis")
+    assert not redis.has_update
+    assert update.has_update  # the app update itself is not skipped
+
+    await manager.async_skip("immich", {"redis": "8.0"})
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    redis = next(s for s in update.services if s.service == "redis")
+    assert redis.latest == "8.1"
+
+
 async def test__untracked_image_that_fails_does_not_fail_the_check(setup, monkeypatch):
     manager, _, data = setup
     registry = manager.registry
@@ -317,6 +333,23 @@ async def test__stop_is_refused_for_own_app(setup):
     manager.self_container_id = data.app_containers("immich")[0].id
     with pytest.raises(AppError):
         await manager.async_app_action("immich", data, "stop")
+
+
+async def test__home_assistant_app_changes_alone(setup):
+    manager, _, _ = setup
+    manager.self_inspect = {"Config": {"Labels": {LABEL_PROJECT: "homeassistant"}}}
+
+    async with manager._operation("immich", "update"):
+        with pytest.raises(AppError, match="immich still changing"):
+            async with manager._operation("homeassistant", "update"):
+                pass
+        async with manager._operation("jellyfin", "update"):
+            pass  # other apps run side by side
+
+    async with manager._operation("homeassistant", "update"):
+        with pytest.raises(AppError, match="Home Assistant is updating"):
+            async with manager._operation("immich", "update"):
+                pass
 
 
 async def test__files_outside_mounts_are_refused(setup):

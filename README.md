@@ -21,6 +21,7 @@ Manage your Docker apps from Home Assistant, like the Apps page of Home Assistan
 * **Clean-up:** prune unused containers, images, volumes, networks and build cache.
 * **App launcher card:** a dashboard card that opens your apps.
 * **Few entities:** about 5 per app, no matter how many containers it has.
+* **Languages:** English and Bulgarian (the Apps panel is in English).
 * **Light:** runs in Home Assistant in Python, on the Docker Engine API. No extra container, no `docker` CLI.
 
 ![App store](./images/store.jpg)

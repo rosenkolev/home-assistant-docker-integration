@@ -15,6 +15,8 @@ LABEL_CONFIG_FILES = "com.docker.compose.project.config_files"
 LABEL_ONEOFF = "com.docker.compose.oneoff"
 LABEL_HELPER = "io.github.rosenkolev.docker_apps.helper"
 LABEL_OCI_VERSION = "org.opencontainers.image.version"
+# name of a new container until the old one is removed
+NEW_SUFFIX = "-docker-apps-new"
 
 
 @dataclass(kw_only=True)

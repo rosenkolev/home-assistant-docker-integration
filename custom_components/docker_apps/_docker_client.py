@@ -1,6 +1,6 @@
 """Async Docker Engine API client on top of aiohttp (unix socket or TCP)."""
 
-# cspell:words percpu vsize
+# cspell:words vsize
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from ._models import (
     LABEL_PROJECT,
     LABEL_SERVICE,
     LABEL_WORKING_DIR,
+    NEW_SUFFIX,
     AppInfo,
     ContainerInfo,
     ContainerStats,
@@ -394,11 +395,9 @@ def parse_stats(data: dict) -> ContainerStats:
     try:
         cpu_delta = cpu["cpu_usage"]["total_usage"] - precpu["cpu_usage"]["total_usage"]
         system_delta = cpu["system_cpu_usage"] - precpu["system_cpu_usage"]
-        cpus = cpu.get("online_cpus") or len(
-            cpu["cpu_usage"].get("percpu_usage") or [1]
-        )
+        # percent of the whole host (all cores), not of one core like `docker stats`
         if system_delta > 0 and cpu_delta >= 0:
-            cpu_percent = round(cpu_delta / system_delta * cpus * 100, 2)
+            cpu_percent = round(cpu_delta / system_delta * 100, 2)
     except (KeyError, TypeError):
         pass
 
@@ -479,6 +478,12 @@ def build_docker_data(info: dict, containers: list[dict]) -> DockerData:
 
         name = (raw.get("Names") or ["/" + raw["Id"][:12]])[0].lstrip("/")
         key, app_key = container_key(labels, name)
+        # during an update the new container (NEW_SUFFIX) and the old one share
+        # a key for a moment: show the old one
+        if key in items and (
+            name.endswith(NEW_SUFFIX) or not items[key].name.endswith(NEW_SUFFIX)
+        ):
+            continue
         project = labels.get(LABEL_PROJECT)
         status = raw.get("Status", "")
 
@@ -525,7 +530,8 @@ def build_docker_data(info: dict, containers: list[dict]) -> DockerData:
                 working_dir=labels.get(LABEL_WORKING_DIR),
                 config_files=config_files.split(",") if config_files else [],
             )
-        app.container_keys.append(key)
+        if key not in app.container_keys:
+            app.container_keys.append(key)
 
     for app in apps.values():
         app.container_keys.sort()

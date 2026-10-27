@@ -228,6 +228,20 @@
         }
       }
     },
+    "skip_update": {
+      "name": "Skip service update",
+      "description": "Hide the available update of untracked services until a newer version comes. For the whole app, skip its update entity.",
+      "fields": {
+        "app": {
+          "name": "App",
+          "description": "App (compose project) name."
+        },
+        "services": {
+          "name": "Services",
+          "description": "Service names."
+        }
+      }
+    },
     "recreate": {
       "name": "Recreate app",
       "description": "Bring the app up again from its compose files.",

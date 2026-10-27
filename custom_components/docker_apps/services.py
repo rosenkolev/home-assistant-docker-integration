@@ -137,6 +137,20 @@ def async_register_services(hass: HomeAssistant) -> None:
         await runtime.updates.async_check_now()
         return {"updated": changes}
 
+    async def skip_update(call: ServiceCall) -> None:
+        _, runtime = get_runtime(hass)
+        app = get_app(runtime, call.data[ATTR_APP])
+        update = (runtime.updates.data or {}).get(app.key)
+        versions = {
+            s.service: s.latest
+            for s in (update.services if update else [])
+            if s.service in call.data["services"] and s.has_update
+        }
+        if not versions:
+            raise ServiceValidationError("these services have no update to skip")
+        await runtime.manager.async_skip(app.key, versions)
+        await runtime.updates.async_check_now()
+
     async def recreate(call: ServiceCall) -> None:
         runtime = writable_runtime()
         app = get_app(runtime, call.data[ATTR_APP])
@@ -151,6 +165,10 @@ def async_register_services(hass: HomeAssistant) -> None:
         action = call.service.removeprefix("container_")
         if action == "stop" and container.id == runtime.manager.self_container_id:
             raise ServiceValidationError("Home Assistant can't stop itself")
+        try:
+            runtime.manager.check_alone(container.app_key)
+        except AppError as err:
+            raise HomeAssistantError(str(err)) from err
         await _call(runtime.client.async_container_action(container.id, action))
         await runtime.docker.async_refresh()
 
@@ -282,6 +300,13 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_APP): cv.string,
                 vol.Required("services"): vol.All(cv.ensure_list, [cv.string]),
                 vol.Optional("tag"): cv.string,
+            },
+        ),
+        "skip_update": (
+            skip_update,
+            {
+                vol.Required(ATTR_APP): cv.string,
+                vol.Required("services"): vol.All(cv.ensure_list, [cv.string]),
             },
         ),
         "recreate": (

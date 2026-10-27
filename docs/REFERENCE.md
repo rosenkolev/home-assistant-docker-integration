@@ -33,7 +33,7 @@ About **5 entities per app**, no matter how many containers the app has. Contain
 | Entity | Description |
 | - | - |
 | `sensor.<app>_status` | `running`, `partial`, `starting`, `unhealthy`, `stopped` or `updating`. The `containers` attribute lists each container's state, health, image, start time and restarts. |
-| `sensor.<app>_cpu` | CPU % of all containers of the app |
+| `sensor.<app>_cpu` | CPU of all containers of the app, in % of the whole host (all cores) |
 | `sensor.<app>_memory` | Memory of all containers of the app |
 | `switch.<app>_running` | Start or stop the whole app |
 | `button.<app>_restart` | Restart the app |
@@ -62,7 +62,9 @@ For a managed app:
 * **Untracked images:** databases (postgres, mysql, mariadb, mongo, ...) and caches (redis, valkey, memcached, ...) are not updated with the app. Change the list in the integration options, or use the **Track** toggle per service in the panel. Untracked services still show when a newer version exists, and can be updated alone.
 * **Upstream compose (optional, per app):** the URL of the app's compose file for each release, with `{version}`, for example `https://github.com/immich-app/immich/releases/download/{version}/docker-compose.yml`. Services that the new version needs in a newer version are then updated with it. If it needs a new **database major version**, the update is **on hold**: Install is refused and a repair explains how to upgrade the database first.
 * **Rollback:** before an update the compose files and `.env` are backed up in `<app>/.docker-apps/history/`. After the update every container must be running and healthy; otherwise the backup is restored automatically. Older versions can be installed again from the update entity (last 3 kept).
-* **Home Assistant itself:** a short-lived container from the new Home Assistant image finishes the update and removes itself.
+* **Home Assistant itself:** a short-lived container from the new Home Assistant image finishes the update and removes itself. Its update restarts Home Assistant, so it runs alone: not while other apps change, and other apps wait until it is done.
+* **Side by side:** other apps update at the same time (also with **Update all**); one app runs one operation at a time.
+* **Skip:** skip an app update in the panel or in **Settings > Updates** (both show the same); an untracked service update can be skipped in the panel. A newer version is offered again.
 
 ## App stores
 
@@ -100,9 +102,11 @@ Saving writes only your changes to `compose.override.yaml` and recreates the cha
 ```yaml
 type: custom:docker-apps-card
 title: Apps          # optional
-exclude:             # optional, compose project names to hide
-  - whoami
+show_stopped: true   # optional, false hides stopped apps
+show_usage: false    # optional, true shows CPU and memory under each app
 ```
+
+The options can also be set in the card's visual editor. CPU is in % of the whole host.
 
 The card shows each app with **Show in app launcher** turned on (in the app menu of the panel). The option is on by default for apps installed from a store, and off for other apps. Tap an app to open its web UI; an app without a web port opens its details.
 
@@ -115,6 +119,7 @@ The card shows each app with **Show in app launcher** turned on (in the app menu
 | `docker_apps.update_services` | Update single services, also untracked ones |
 | `docker_apps.set_environment` | Change environment variables of one service (kept in `compose.override.yaml`) |
 | `docker_apps.set_volumes` | Set the folders and volumes of one service; the app's own ones must stay |
+| `docker_apps.skip_update` | Hide the update of untracked services until a newer version comes (skip a whole app with its update entity) |
 | `docker_apps.recreate` | Bring an app up again from its compose files (optionally pull first) |
 | `docker_apps.container_start` / `_stop` / `_restart` | Control one container |
 | `docker_apps.prune` | Remove stopped containers, dangling or unused images, unused volumes, networks or build cache |

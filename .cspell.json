@@ -9,7 +9,8 @@
     "extensions.json",
     "manifest.json",
     "pytest.ini",
-    "reports/"
+    "reports/",
+    "custom_components/docker_apps/translations/bg.json"
   ],
   "words": [
     "casaos",

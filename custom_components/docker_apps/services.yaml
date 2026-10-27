@@ -61,6 +61,17 @@ update_services:
     tag:
       selector:
         text:
+skip_update:
+  fields:
+    app:
+      required: true
+      selector:
+        text:
+    services:
+      required: true
+      selector:
+        text:
+          multiple: true
 recreate:
   fields:
     app:

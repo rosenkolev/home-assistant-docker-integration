@@ -147,6 +147,8 @@ class AppSettings:
     launcher: bool | None = None
     store: dict | None = None
     history: list[dict] = field(default_factory=list)
+    # untracked service -> version whose update was skipped
+    skipped: dict[str, str] = field(default_factory=dict)
 
     @property
     def store_app_id(self) -> str | None:
@@ -374,6 +376,12 @@ class AppManager:
         await self.async_save()
         self._notify()
 
+    async def async_skip(self, app_key: str, versions: dict[str, str]) -> None:
+        """Hide these versions of untracked services until a newer one comes."""
+        self.settings.setdefault(app_key, AppSettings()).skipped.update(versions)
+        await self.async_save()
+        self._notify()
+
     def service_images(
         self, app_key: str, data: DockerData
     ) -> dict[str, tuple[str, bool]]:
@@ -410,6 +418,16 @@ class AppManager:
         """True when Home Assistant runs with the host network."""
         host = (self.self_inspect or {}).get("HostConfig") or {}
         return host.get("NetworkMode") == "host"
+
+    @property
+    def self_app(self) -> str | None:
+        """Key of the app Home Assistant runs in (compose project or container name)."""
+        if self.self_inspect is None:
+            return None
+        labels = (self.self_inspect.get("Config") or {}).get("Labels") or {}
+        return labels.get(LABEL_PROJECT) or self.self_inspect.get("Name", "").lstrip(
+            "/"
+        )
 
     def self_service(self, data: DockerData | None, app_key: str) -> str | None:
         """Return the service of the Home Assistant container if it is in this app."""
@@ -541,6 +559,9 @@ class AppManager:
                 if tracked:
                     errors.append(f"{service}: {err}")
             result.tracked = tracked
+            if not tracked and settings.skipped.get(service) == result.latest:
+                result.latest = result.current
+
             services.append(result)
 
         primary = primary_service(app_key, [s for s in services if s.tracked])
@@ -641,6 +662,7 @@ class AppManager:
         """One operation per app at a time, shown as busy, with Docker errors as AppError."""
         lock = self._locks.setdefault(app_key, asyncio.Lock())
         async with lock:
+            self.check_alone(app_key)
             self.busy[app_key] = action
             self.progress[app_key] = 0
             self._notify()
@@ -652,6 +674,20 @@ class AppManager:
                 self.busy.pop(app_key, None)
                 self.progress.pop(app_key, None)
                 self._notify()
+
+    def check_alone(self, app_key: str) -> None:
+        """Home Assistant's own app changes alone: its update restarts Home
+        Assistant, which would cut off the operations of other apps."""
+        own = self.self_app
+        if own is None:
+            return
+        if app_key == own and (others := sorted(set(self.busy) - {own})):
+            raise AppError(
+                f"{', '.join(others)} still changing; "
+                "change Home Assistant when they are done"
+            )
+        if app_key != own and own in self.busy:
+            raise AppError("Home Assistant is updating; try again after it restarts")
 
     def _progress(self, app_key: str, start: float, end: float):
         def report(message: str, fraction: float | None):
@@ -694,6 +730,7 @@ class AppManager:
             raise AppError(f"app {app_key} not found")
         if action == "stop" and self.self_service(data, app_key):
             raise AppError("Home Assistant can't stop its own app")
+        self.check_alone(app_key)
         await asyncio.gather(
             *(self.client.async_container_action(c.id, action) for c in containers)
         )

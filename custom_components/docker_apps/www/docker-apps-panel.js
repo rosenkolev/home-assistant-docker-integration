@@ -279,6 +279,7 @@ class DockerAppsPanel extends HTMLElement {
     this._error = null;
     this._shown = STORE_PAGE;
     this._loadSeq = 0; // the newest _load wins; older answers are dropped
+    this._pending = new Set(); // keys of actions this page runs (app, container, ...)
     this._logGen = 0; // the newest log subscription wins
   }
 
@@ -441,7 +442,7 @@ class DockerAppsPanel extends HTMLElement {
     }
     const filter = this._filter.toLowerCase();
     const apps = state.apps.filter((a) => !filter || a.name.toLowerCase().includes(filter));
-    const updates = state.apps.filter((a) => a.update?.available).length;
+    const updates = state.apps.filter((a) => this._hasUpdate(a)).length;
     const managed = state.apps.filter((a) => a.managed).length;
     return `
       ${notices.map((n) => `<div class="notice">${icon("information-outline")}<div>${n}</div></div>`).join("")}
@@ -454,7 +455,7 @@ class DockerAppsPanel extends HTMLElement {
       </div>
       <div class="toolbar">
         <input id="filter" placeholder="Search apps" value="${esc(this._filter)}" data-input="filter">
-        <button class="btn" data-action="check-updates">${icon("refresh")} Check for updates</button>
+        <button class="btn" data-action="check-updates" ${this._pending.has("check-updates") ? "disabled" : ""}>${icon("refresh")} Check for updates</button>
       </div>
       <div class="grid">${apps.map((a) => this._renderApp(a, state.read_only)).join("") || `<div class="empty">No apps</div>`}</div>`;
   }
@@ -473,16 +474,19 @@ class DockerAppsPanel extends HTMLElement {
     if (app.compose) iconName = "layers-outline";
     if (isSelf) iconName = "home-assistant";
     const appIcon = app.icon ? `<img class="app-icon" src="${esc(app.icon)}" alt="">` : `<div class="app-icon">${icon(iconName)}</div>`;
+    const busy = this._isBusy(app);
 
     let banner = "";
     if (update?.blocked) {
       banner = `<div class="banner hold">${icon("pause-circle-outline")}<div class="grow"><div class="title">Update on hold</div>
         <div class="muted">${esc(update.blocked)}</div></div></div>`;
-    } else if (update?.available) {
+    } else if (!app.busy && this._hasUpdate(app)) {
+      // while the app changes, a check can see it half updated: no banner then
       banner = `<div class="banner">${icon("arrow-up-circle-outline")}<div class="grow">
           <div class="title">Update available: ${esc(update.latest)}</div>
           <div class="muted">${update.store ? "New app package" : `${update.changes.length} service${update.changes.length === 1 ? "" : "s"} change`}</div></div>
-        ${readOnly ? "" : `<button class="btn primary" data-action="update" ${data} ${app.busy ? "disabled" : ""}>Update</button>`}</div>`;
+        ${readOnly ? "" : `<button class="btn" data-action="skip" ${data} ${busy ? "disabled" : ""} title="Hide this version until a newer one comes">Skip</button>
+          <button class="btn primary" data-action="update" ${data} ${busy ? "disabled" : ""}>Update</button>`}</div>`;
     } else if (update?.error) {
       banner = `<div class="banner error">${icon("alert-circle-outline")}<div class="grow muted">Update check failed: ${esc(update.error)}</div></div>`;
     }
@@ -496,7 +500,7 @@ class DockerAppsPanel extends HTMLElement {
       app.managed && !app.store ? ["settings", "tune-variant", "Update settings…"] : null,
       isSelf ? null : ["uninstall", "delete-outline", "Remove…", "danger"],
     ].filter(Boolean);
-    const button = (action, name, title) => iconButton(action, name, title, { data, disabled: app.busy });
+    const button = (action, name, title) => iconButton(action, name, title, { data, disabled: busy });
     const power = cls === "off" ? button("start", "play", "Start") : button("stop", "stop", "Stop");
     const actions = `
       <div class="section footer">
@@ -507,7 +511,7 @@ class DockerAppsPanel extends HTMLElement {
         ${readOnly ? "" : button("restart", "restart", "Restart")}
         ${readOnly || isSelf ? "" : power}
         ${readOnly || !menuItems.length ? "" : `<div class="menu-wrap">
-          ${iconButton("menu", "dots-vertical", "More", { data })}
+          ${iconButton("menu", "dots-vertical", "More", { data, disabled: busy })}
           ${this._menu === app.key ? `<div class="menu">${menuItems
             .map(([action, name, text, style]) => `<button class="${style || ""}" data-action="${action}" ${data}>${icon(name)}${text}</button>`)
             .join("")}</div>` : ""}
@@ -538,13 +542,13 @@ class DockerAppsPanel extends HTMLElement {
           <button class="containers-toggle ${open ? "open" : ""}" data-action="toggle" ${data}>
             ${icon("chevron-right")} ${app.containers.length} container${app.containers.length === 1 ? "" : "s"}
           </button>
-          ${open ? app.containers.map((c) => this._renderContainer(app, c, readOnly)).join("") : ""}
+          ${open ? app.containers.map((c) => this._renderContainer(app, c, readOnly, busy)).join("") : ""}
         </div>
         ${actions}
       </div>`;
   }
 
-  _renderContainer(app, c, readOnly) {
+  _renderContainer(app, c, readOnly, busy) {
     const [cls, label] = containerStatus(c);
     const canTrack = app.managed && !readOnly && !app.store && c.service;
     const track = canTrack
@@ -555,10 +559,10 @@ class DockerAppsPanel extends HTMLElement {
     const newer = c.latest
       ? `<span class="chip ${c.required ? "warn" : "info"}">${icon("arrow-up")}${esc(c.latest)}${c.required ? " required" : ""}</span>`
       : "";
+    const serviceData = `data-app="${esc(app.key)}" data-service="${esc(c.service)}" data-tag="${esc(c.latest)}"`;
     const updateOne = c.latest && !c.tracked && !readOnly && app.editable
-      ? iconButton("update-service", "arrow-up-bold-circle-outline", `Update ${c.service} to ${c.latest}`, {
-          data: `data-app="${esc(app.key)}" data-service="${esc(c.service)}" data-tag="${esc(c.latest)}"`,
-        })
+      ? iconButton("skip-service", "skip-next-outline", `Skip ${c.latest} of ${c.service}`, { data: serviceData, disabled: busy, small: true }) +
+        iconButton("update-service", "arrow-up-bold-circle-outline", `Update ${c.service} to ${c.latest}`, { data: serviceData, disabled: busy, small: true })
       : "";
     const containerData = `data-container="${esc(c.key)}"`;
     return `
@@ -578,7 +582,7 @@ class DockerAppsPanel extends HTMLElement {
         <div class="tools">
           ${updateOne}
           ${iconButton("container-logs", "text-box-outline", "Logs", { data: containerData, small: true })}
-          ${readOnly || c.is_self ? "" : iconButton("container-restart", "restart", "Restart", { data: containerData, small: true })}
+          ${readOnly || c.is_self ? "" : iconButton("container-restart", "restart", "Restart", { data: containerData, disabled: busy, small: true })}
         </div>
       </div>`;
   }
@@ -605,7 +609,7 @@ class DockerAppsPanel extends HTMLElement {
         <input id="filter" placeholder="Search ${store.apps.length} apps" value="${esc(this._filter)}" data-input="filter">
         <select data-input="category" id="category"><option value="">All categories</option>
           ${categories.map((c) => `<option ${c === this._category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
-        <button class="btn" data-action="refresh-store">${icon("refresh")} Refresh</button>
+        <button class="btn" data-action="refresh-store" ${this._pending.has("refresh-store") ? "disabled" : ""}>${icon("refresh")} Refresh</button>
       </div>
       <div class="grid">${apps.slice(0, this._shown).map((a) => this._renderStoreApp(a)).join("") || `<div class="empty">No apps found</div>`}</div>
       ${apps.length > this._shown ? `<div class="empty"><button class="btn" data-action="more">Show more (${apps.length - this._shown} left)</button></div>` : ""}`;
@@ -719,21 +723,30 @@ class DockerAppsPanel extends HTMLElement {
       return;
     }
     if (this._menu) this._closeMenu();
-    // one action at a time: a second click while a dialog loads would open it twice
-    if (this._acting) return;
-    this._acting = true;
+    // one action per app (container, store app, ...) at a time; its buttons are
+    // disabled until it ends, other apps stay usable
+    const key = app || container || store || action;
+    if (this._pending.has(key)) return;
+    this._pending.add(key);
+    this._renderMain();
     try {
       switch (action) {
         case "check-updates":
-          button.disabled = true;
           await this._call("check_updates", { repositories: false });
           break;
         case "refresh-store":
-          button.disabled = true;
           await this._call("check_updates", { repositories: true });
           break;
         case "update":
           if (await this._confirmUpdate(appInfo)) await this._callEntity("update", "install", appInfo);
+          break;
+        case "skip":
+          await this._callEntity("update", "skip", appInfo);
+          this._toast(`${appInfo.name} ${appInfo.update.latest} skipped`);
+          break;
+        case "skip-service":
+          await this._call("skip_update", { app, services: [service] });
+          this._toast(`${service} ${tag} skipped`);
           break;
         case "rollback": {
           const version = await this._pick(`Roll back ${appInfo.name}`, "Bring back the compose files of an earlier version.", appInfo.history);
@@ -819,15 +832,35 @@ class DockerAppsPanel extends HTMLElement {
     } catch (err) {
       this._showError(err);
     } finally {
-      this._acting = false;
+      this._pending.delete(key);
     }
     this._load();
   }
 
+  // busy on the server (any browser), or an action of this page still runs; Home
+  // Assistant's own app changes alone, as its update restarts Home Assistant
+  _isBusy(app) {
+    const changing = (a) => Boolean(a.busy) || this._pending.has(a.key);
+    if (changing(app)) return true;
+    const isSelf = (a) => a.containers.some((c) => c.is_self);
+    const others = this._state.apps.filter((a) => a !== app && changing(a));
+    return isSelf(app) ? others.length > 0 : others.some(isSelf);
+  }
+
+  // an update that is not skipped (skipping is kept by the update entity, as in Settings > Updates)
+  _hasUpdate(app) {
+    if (!app.update?.available) return false;
+    const entity = this._entity(app, "update");
+    const skipped = entity && this._hass.states[entity.entity_id]?.attributes.skipped_version;
+    return !skipped || skipped !== app.update.latest;
+  }
+
+  _entity(app, domain) {
+    return Object.values(this._hass.entities).find((e) => e.device_id === app.device_id && e.entity_id.startsWith(`${domain}.`));
+  }
+
   async _callEntity(domain, service, app, extra = {}) {
-    const entity = Object.values(this._hass.entities).find(
-      (e) => e.device_id === app.device_id && e.entity_id.startsWith(`${domain}.`),
-    );
+    const entity = this._entity(app, domain);
     if (!entity) throw new Error(`${domain} entity of ${app.name} not found`);
     await this._hass.callService(domain, service, { entity_id: entity.entity_id, ...extra }, undefined, false);
   }
@@ -835,11 +868,17 @@ class DockerAppsPanel extends HTMLElement {
   // --- dialogs ---
 
   // One dialog element is reused. Buttons carry `data-r`: close and no close the
-  // dialog, every other value goes to this._dialogAction(r, button).
+  // dialog, every other value goes to this._dialogAction(r, button); closing calls
+  // this._dialogClosed().
   _dialog(title, body, buttons, wide = false) {
     const dialog = this.shadowRoot.getElementById("dialog");
-    dialog.oninput = dialog.onchange = dialog.onclose = null;
-    this._dialogAction = null;
+    dialog.oninput = dialog.onchange = null;
+    this._dialogAction = this._dialogClosed = null;
+    // the close event comes a moment after close(): when the next dialog is open
+    // by then, it belongs to the previous one
+    dialog.onclose = () => {
+      if (!dialog.open) this._dialogClosed?.();
+    };
     dialog.onclick = (ev) => {
       const button = ev.target.closest("[data-r]");
       const r = button?.dataset.r;
@@ -864,7 +903,7 @@ class DockerAppsPanel extends HTMLElement {
         resolve(onYes());
         dialog.close();
       };
-      dialog.onclose = () => resolve(null);
+      this._dialogClosed = () => resolve(null);
     });
   }
 
@@ -1231,7 +1270,7 @@ class DockerAppsPanel extends HTMLElement {
         }
       }, PORT_CHECK_MS);
     };
-    dialog.onclose = () => clearTimeout(portTimer);
+    this._dialogClosed = () => clearTimeout(portTimer);
     this._dialogAction = async (r, button) => {
       if (r === "use-port") {
         const input = dialog.querySelector("[data-var=APP_PORT]");
@@ -1306,7 +1345,7 @@ class DockerAppsPanel extends HTMLElement {
     this._dialogAction = (r) => {
       if (r === "copy") navigator.clipboard?.writeText(output.textContent);
     };
-    dialog.onclose = () => this._stopLogs();
+    this._dialogClosed = () => this._stopLogs();
     start(keys[0]);
   }
 
