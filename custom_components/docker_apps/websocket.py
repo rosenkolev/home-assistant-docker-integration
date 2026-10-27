@@ -172,8 +172,12 @@ def ws_store(
     _, runtime = get_runtime(hass)
     catalog = runtime.catalog
     arch = runtime.docker.data.host.arch
+    # an app whose containers were removed is not installed, even with settings left
+    apps = runtime.docker.data.apps
     installed = {
-        s.store_app_id: key for key, s in runtime.manager.settings.items() if s.store
+        s.store_app_id: key
+        for key, s in runtime.manager.settings.items()
+        if s.store and key in apps
     }
     installing = {store_id: key for key, store_id in runtime.manager.installing.items()}
     connection.send_result(

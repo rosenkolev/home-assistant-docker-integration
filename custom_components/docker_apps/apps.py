@@ -1179,8 +1179,12 @@ class AppManager:
             installed = self.get(app_key).store
             if is_update and installed is None:
                 raise AppError(f"{app_key} was not installed from a store")
-            if not is_update and (installed or (data and app_key in data.apps)):
-                raise AppError(f"an app named {app_key} already exists")
+            if not is_update:
+                # settings of an app whose containers were removed outside are stale
+                if app_key in data.apps if data else installed:
+                    raise AppError(f"an app named {app_key} already exists")
+                installed = None
+                self.settings.pop(app_key, None)
             # values chosen at install time (a web port, secrets) stay on updates
             values = {**((installed or {}).get("values") or {}), **(values or {})}
             compose, env = self._render(store_app, app_key, values)

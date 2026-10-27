@@ -137,6 +137,16 @@ async def test__failed_install_leaves_nothing_behind(manager, tmp_path, monkeypa
     assert "whoami" not in manager.settings
 
 
+async def test__app_removed_outside_can_be_installed_again(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    manager.client.containers.clear()  # pruned while stopped
+    data = await manager.client.async_fetch()
+
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert manager.client.containers
+
+
 async def test__uninstall_with_data_removes_folders(manager, tmp_path):
     data = await manager.client.async_fetch()
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
