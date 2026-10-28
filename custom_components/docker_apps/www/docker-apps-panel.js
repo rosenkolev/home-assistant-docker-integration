@@ -4,6 +4,7 @@
 
 const DOMAIN = "docker_apps";
 const REFRESH_MS = 5000;
+const RETRY_MS = 1000;
 const STORE_PAGE = 60;
 const PORT_CHECK_MS = 400; // typing pause before the web port is checked again
 const LOG_LINES_MAX = 5000; // above this the log view keeps only the newest lines
@@ -315,6 +316,7 @@ class DockerAppsPanel extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    clearTimeout(this._retry);
     document.removeEventListener("keydown", this._onKey);
     this._stopLogs();
   }
@@ -364,6 +366,13 @@ class DockerAppsPanel extends HTMLElement {
       this._error = null;
     } catch (err) {
       if (seq !== this._loadSeq) return;
+      // while Home Assistant starts, the connection drops (a bare error code) or
+      // Docker Apps isn't loaded yet: keep loading and try again
+      if (typeof err === "number" || err.code === "unknown_command") {
+        clearTimeout(this._retry);
+        this._retry = setTimeout(() => this._load(), RETRY_MS);
+        return;
+      }
       this._error = err.message || String(err);
     }
     this._renderMain();
@@ -376,7 +385,7 @@ class DockerAppsPanel extends HTMLElement {
       <nav>${Object.entries(TABS)
         .map(([tab, [, label]]) => `<button data-tab="${tab}" class="${tab === this._tab ? "active" : ""}">${label}</button>`)
         .join("")}</nav>
-      <main></main>
+      <main><div class="empty">Loading…</div></main>
       <dialog id="dialog"></dialog>`;
     const menu = this.shadowRoot.querySelector("ha-menu-button");
     menu.hass = this._hass;
