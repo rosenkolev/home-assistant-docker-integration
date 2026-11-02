@@ -127,6 +127,84 @@ def test__load_model_should_reject_build_only_services():
         )
 
 
+HWACCEL = """
+services:
+  rkmpp:
+    security_opt:
+      - systempaths=unconfined
+    group_add: [video]
+    devices:
+      - /dev/dri:/dev/dri
+  cpu: {}
+"""
+
+
+def test__load_model_should_merge_extends_from_another_file():
+    compose = """
+services:
+  server:
+    image: ghcr.io/immich-app/immich-server:${VERSION}
+    extends:
+      file: hwaccel.yml
+      service: rkmpp
+    devices:
+      - /dev/mali0:/dev/mali0
+"""
+    files = {"/srv/a/hwaccel.yml": HWACCEL}
+    m = load_model(
+        "a",
+        "/srv/a",
+        {"/srv/a/compose.yaml": compose},
+        "VERSION=v3.3.5",
+        read_file=files.get,
+    )
+    server = m.services["server"]
+    assert "extends" not in server
+    assert server["image"].endswith(":v3.3.5")
+    assert server["group_add"] == ["video"]
+    assert server["devices"] == ["/dev/dri:/dev/dri", "/dev/mali0:/dev/mali0"]
+    host = build_container_config(m, "server")["HostConfig"]
+    assert host["MaskedPaths"] == []
+    assert host["GroupAdd"] == ["video"]
+
+
+def test__load_model_should_merge_extends_from_same_file():
+    compose = """
+services:
+  base:
+    image: busybox
+    environment: {A: "1"}
+  app:
+    extends: base
+    environment: {B: "2"}
+"""
+    m = load_model("a", "/srv/a", {"/srv/a/compose.yaml": compose}, None)
+    assert m.services["app"]["image"] == "busybox"
+    assert m.services["app"]["environment"] == {"A": "1", "B": "2"}
+
+
+@pytest.mark.parametrize(
+    ("compose", "error"),
+    [
+        (
+            "services:\n  a:\n    image: x\n    extends: {file: none.yml, service: b}\n",
+            "not found",
+        ),
+        ("services:\n  a:\n    image: x\n    extends: b\n", "unknown service"),
+        (
+            "services:\n  a:\n    image: x\n    extends: b\n"
+            "  b:\n    image: x\n    extends: a\n",
+            "loops",
+        ),
+    ],
+)
+def test__load_model_should_reject_bad_extends(compose, error):
+    with pytest.raises(ComposeError, match=error):
+        load_model(
+            "a", "/srv/a", {"/srv/a/compose.yaml": compose}, None, read_file={}.get
+        )
+
+
 def test__start_order_should_put_dependencies_first():
     order = start_order(model())
     assert order.index("redis") < order.index("immich-server")

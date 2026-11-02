@@ -4,8 +4,8 @@ It reads compose files and `.env`, then creates networks, volumes and containers
 the standard `com.docker.compose.*` labels, so `docker compose`, Arcane, Dockge and
 Portainer still see the same projects. Covered: the common Compose spec subset
 (image, ports, volumes, devices, networks, network_mode, healthcheck, depends_on with
-conditions, env_file, profiles, deploy resources, gpus, restart, logging, ...).
-Not covered: `build`, `extends`, `include`, swarm-only keys.
+conditions, env_file, profiles, extends, deploy resources, gpus, restart, logging,
+...). Not covered: `build`, `include`, swarm-only keys.
 """
 
 # cspell:words cpuset Dockge kmgt memswap nocopy Pids pstart Rootfs Sysctls Ulimits Userns
@@ -195,6 +195,11 @@ def merge(base, override):
                 "dns",
                 "dns_search",
                 "tmpfs",
+                "cap_add",
+                "cap_drop",
+                "group_add",
+                "security_opt",
+                "device_cgroup_rules",
             ):
                 result[key] = list(
                     dict.fromkeys([*_as_list(result[key]), *_as_list(value)])
@@ -264,11 +269,19 @@ def load_model(
         loaded = load_yaml(text) or {}
         if not isinstance(loaded, dict):
             raise ComposeError(f"{name} is not a compose file")
-        for key in ("extends", "include"):
-            if key in loaded:
-                raise ComposeError(f"'{key}' is not supported ({name})")
+        if "include" in loaded:
+            raise ComposeError(f"'include' is not supported ({name})")
         data = merge(data, loaded)
     data = untag(data)
+
+    defined = data.get("services") or {}
+    extended: dict[str, dict] = {}
+    data["services"] = {
+        name: _extend(
+            name, defined, working_dir, read_file, extended, ((id(defined), name),)
+        )
+        for name in defined
+    }
 
     data = interpolate(data, env)
     project = data.get("name") or project
@@ -277,8 +290,6 @@ def load_model(
         service = dict(service or {})
         if service.get("profiles"):
             continue  # profiles are opt-in and none is active
-        if "extends" in service:
-            raise ComposeError(f"service '{name}': 'extends' is not supported")
         if not service.get("image"):
             raise ComposeError(
                 f"service '{name}' has no image ('build' is not supported)"
@@ -299,6 +310,46 @@ def load_model(
         for service in services.values():
             service["_env_file_values"] = _read_env_files(model, service, read_file)
     return model
+
+
+def _extend(
+    name: str,
+    services: dict,
+    directory: str,
+    read_file: Callable[[str], str | None] | None,
+    files: dict[str, dict],
+    chain: tuple,
+) -> dict:
+    """The service with what it `extends` merged in, from this or another file.
+
+    `files` caches the services of other files by host path; `chain` finds loops.
+    """
+    service = dict(services[name] or {})
+    spec = service.pop("extends", None)
+    if not spec:
+        return service
+    if isinstance(spec, str):
+        spec = {"service": spec}
+    base = spec.get("service")
+    source, base_directory = services, directory
+    if file := spec.get("file"):
+        path = posixpath.normpath(posixpath.join(directory, file))
+        if path not in files:
+            text = read_file(path) if read_file else None
+            if text is None:
+                raise ComposeError(f"service '{name}': extends file {file} not found")
+            loaded = untag(load_yaml(text) or {})
+            files[path] = (
+                loaded.get("services") if isinstance(loaded, dict) else None
+            ) or {}
+        source, base_directory = files[path], posixpath.dirname(path)
+    if base not in source:
+        raise ComposeError(f"service '{name}': extends unknown service '{base}'")
+    key = (id(source), base)
+    if key in chain:
+        raise ComposeError(f"service '{name}': extends loops at '{base}'")
+    parent = _extend(base, source, base_directory, read_file, files, (*chain, key))
+    return merge(parent, service)
 
 
 def _read_env_files(model: ComposeModel, service: dict, read_file) -> dict[str, str]:
