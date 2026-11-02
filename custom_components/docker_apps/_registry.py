@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
+from urllib.parse import quote
 
 import aiohttp
 
@@ -20,11 +22,23 @@ MANIFEST_ACCEPT = ", ".join(
 TAGS_PAGE_SIZE = 1000
 TAGS_MAX_PAGES = 10
 CACHE_SECONDS = 3600
+RETRY_SECONDS = 5
+RETRY_MAX_SECONDS = 60
+# registries that list tags by creation time, not by name (lscr.io is ghcr.io)
+CREATION_ORDER_REGISTRIES = {"ghcr.io", "lscr.io"}
 _AUTH_PARAM = re.compile(r'(\w+)="([^"]*)"')
 
 
 class RegistryError(Exception):
     """Registry request failed."""
+
+
+def _retry_after(value: str | None) -> float:
+    try:
+        seconds = float(value) if value else RETRY_SECONDS
+    except ValueError:
+        seconds = RETRY_SECONDS
+    return min(max(seconds, 0), RETRY_MAX_SECONDS)
 
 
 def parse_reference(image: str) -> tuple[str, str, str]:
@@ -108,23 +122,31 @@ class RegistryClient:
         request_headers = dict(headers or {})
         request_headers.update(await self._auth_headers(registry, repository))
 
-        for attempt in range(2):
+        authorized = limited = False
+        while True:
+            delay = None
             async with self._session.request(
                 method, url, headers=request_headers
             ) as resp:
-                if resp.status == 401 and attempt == 0:
+                if resp.status == 401 and not authorized:
+                    authorized = True
                     challenge = resp.headers.get("Www-Authenticate")
                     request_headers.update(
                         await self._auth_headers(registry, repository, challenge)
                     )
                     continue
-                if resp.status >= 400:
+                if resp.status == 429 and not limited:
+                    # too many requests: wait as long as the registry asks, once
+                    limited = True
+                    delay = _retry_after(resp.headers.get("Retry-After"))
+                elif resp.status >= 400:
                     raise RegistryError(f"{method} {url}: {resp.status}")
-                body = None
-                if method != "HEAD":
-                    body = await resp.json(content_type=None)
-                return dict(resp.headers), body
-        raise RegistryError(f"{method} {url}: unauthorized")
+                else:
+                    body = None
+                    if method != "HEAD":
+                        body = await resp.json(content_type=None)
+                    return dict(resp.headers), body
+            await asyncio.sleep(delay)
 
     async def async_digest(self, image: str) -> str | None:
         """Return the remote digest (index or manifest) of an image tag."""
@@ -142,14 +164,22 @@ class RegistryClient:
         return self._store(key, headers.get("Docker-Content-Digest"))
 
     async def async_tags(self, image: str) -> list[str]:
-        """Return all tags of the image repository."""
+        """Return the tags of the image repository.
+
+        ghcr.io lists tags by creation time, and some repositories have tens of
+        thousands: there only the tags pushed after the image's tag are read.
+        """
         registry, repository, _ = parse_reference(image)
-        key = ("tags", registry, repository)
+        tag = split_image(image)[1]
+        after = tag if registry in CREATION_ORDER_REGISTRIES else None
+        key = ("tags", registry, repository, after)
         if (hit := self._cached(key)) is not None:
             return hit
 
         tags: list[str] = []
         path = f"tags/list?n={TAGS_PAGE_SIZE}"
+        if after:
+            path += f"&last={quote(after)}"
         for _ in range(TAGS_MAX_PAGES):
             headers, body = await self._get(registry, repository, path)
             tags.extend((body or {}).get("tags") or [])
