@@ -1,4 +1,4 @@
-# cspell:words INITDB
+# cspell:words INITDB hwaccel rkmpp
 
 import pytest
 
