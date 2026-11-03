@@ -30,7 +30,8 @@ jobs:
           # check every file: after a force push the previous commit is gone
           incremental_files_only: false
       - name: Test with pytest
-        run: coverage run --data-file reports/.coverage -m pytest -v -s
+        # --source also counts the files no test imports
+        run: coverage run --source=custom_components --data-file reports/.coverage -m pytest -v -s
       - name: Generate Coverage Report Summary
         run: coverage report -m --data-file reports/.coverage --format=markdown --include=custom_components/** >> $GITHUB_STEP_SUMMARY
       - name: Generate Coverage Report
