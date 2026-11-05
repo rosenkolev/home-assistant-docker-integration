@@ -5,7 +5,8 @@
 #   scripts/sandbox.sh up      create (or start) the sandbox, onboard and set up Docker Apps
 #   scripts/sandbox.sh deploy  copy the integration into the sandbox and restart Home Assistant
 #   scripts/sandbox.sh token   print an access token of the test account
-#   scripts/sandbox.sh tunnel  forward http://localhost:18123 to the sandbox (runs until stopped)
+#   scripts/sandbox.sh tunnel [port...]  forward http://localhost:18123 and the app ports
+#                              to the sandbox (runs until stopped; restart it for new apps)
 #   scripts/sandbox.sh down    remove the sandbox with all its containers, images and data
 #
 # Settings and the generated test account are kept in .sandbox.env (git ignored):
@@ -14,7 +15,7 @@
 #   SANDBOX_DOCKER    docker command on the host (default: sudo -n docker)
 #   SANDBOX_DIR       folder on the host (default: docker-apps-sandbox in the home folder)
 #   SANDBOX_HA        Home Assistant image (default: ghcr.io/home-assistant/home-assistant:stable)
-#   SANDBOX_STORE     app store repository added on setup (default: Big Bear CasaOS)
+#   SANDBOX_STORE     app store repository added on setup (default: CasaOS official)
 # cspell:words dind certdir urandom
 set -euo pipefail
 
@@ -26,7 +27,7 @@ ENV_FILE="$ROOT/.sandbox.env"
 SANDBOX_DOCKER=${SANDBOX_DOCKER:-sudo -n docker}
 SANDBOX_DIR=${SANDBOX_DIR:-docker-apps-sandbox}
 SANDBOX_HA=${SANDBOX_HA:-ghcr.io/home-assistant/home-assistant:stable}
-SANDBOX_STORE=${SANDBOX_STORE:-https://github.com/bigbeartechworld/big-bear-casaos}
+SANDBOX_STORE=${SANDBOX_STORE:-https://github.com/IceWhaleTech/CasaOS-AppStore}
 SANDBOX_USER=${SANDBOX_USER:-sandbox}
 DIND=docker:27.5.1-dind
 PORT=18123
@@ -155,7 +156,19 @@ deploy)
   echo deployed
   ;;
 token) token ;;
-tunnel) exec "${SSH[@]}" -N -o ExitOnForwardFailure=yes -L "$PORT:127.0.0.1:$PORT" ;;
+tunnel)
+  # the web ports of the sandbox apps too (or the ports given), through the
+  # sandbox container's address on the host
+  ip=$(remote "\$D inspect -f '{{json .NetworkSettings.Networks}}' docker-apps-sandbox" |
+    grep -o '"IPAddress":"[0-9.]*"' | head -1 | cut -d'"' -f4)
+  ports=${*:2}
+  [[ -n $ports ]] || ports=$(remote "\$D exec docker-apps-sandbox docker ps --format '{{.Ports}}'" |
+    grep -o '0\.0\.0\.0:[0-9]*' | cut -d: -f2 | sort -un | tr '\n' ' ')
+  forwards=(-L "$PORT:127.0.0.1:$PORT")
+  for p in $ports; do forwards+=(-L "$p:$ip:$p"); done
+  echo "forwarding $CLIENT and app ports: ${ports:-none}"
+  exec "${SSH[@]}" -N -o ExitOnForwardFailure=yes "${forwards[@]}"
+  ;;
 down)
   # the engine folder belongs to root: delete it from a container
   remote "[ -d \$S ] || exit 0
@@ -166,7 +179,7 @@ cd && rm -rf \$S && \$D rmi $DIND >/dev/null"
   echo "sandbox removed"
   ;;
 *)
-  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
   ;;
 esac

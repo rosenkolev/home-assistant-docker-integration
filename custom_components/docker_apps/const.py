@@ -26,7 +26,6 @@ EVENT_DOCKER = f"{DOMAIN}_event"
 
 KNOWN_REPOSITORIES = {
     "https://github.com/IceWhaleTech/CasaOS-AppStore": ("casaos", "CasaOS official"),
-    "https://github.com/bigbeartechworld/big-bear-casaos": ("casaos", "BigBear CasaOS"),
     "https://github.com/runtipi/runtipi-appstore": ("runtipi", "Runtipi official"),
 }
 

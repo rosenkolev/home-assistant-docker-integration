@@ -204,7 +204,11 @@ def async_register_services(hass: HomeAssistant) -> None:
         app = get_app(runtime, call.data[ATTR_APP])
         await _call(
             runtime.manager.async_set_environment(
-                app, call.data["service"], call.data["variables"], runtime.docker.data
+                app,
+                call.data["service"],
+                call.data["variables"],
+                runtime.docker.data,
+                call.data["remove"],
             )
         )
         await runtime.docker.async_refresh()
@@ -335,7 +339,8 @@ def async_register_services(hass: HomeAssistant) -> None:
             {
                 vol.Required(ATTR_APP): cv.string,
                 vol.Required("service"): cv.string,
-                vol.Required("variables"): {cv.string: cv.string},
+                vol.Optional("variables", default={}): {cv.string: cv.string},
+                vol.Optional("remove", default=[]): [cv.string],
             },
         ),
         "set_volumes": (

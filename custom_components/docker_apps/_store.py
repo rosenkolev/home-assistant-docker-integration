@@ -4,7 +4,7 @@ Every source is turned into the same normalized `StoreApp`. Rendering an app giv
 plain compose file plus a `.env`, so installed apps are ordinary compose projects.
 """
 
-# cspell:words armhf armv dotenv Selkies
+# cspell:words armhf armv Baïkal dbgate dotenv Selkies
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ import re
 import secrets
 import string
 import tarfile
+import unicodedata
 import zipfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
 import yaml
@@ -29,6 +31,7 @@ KINDS = (KIND_CASAOS, KIND_RUNTIPI)
 ARCH_ALIASES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm", "armhf": "arm"}
 _GITHUB = re.compile(r"^https://github\.com/([^/]+)/([^/#?]+?)(?:\.git)?/?$")
 _SAFE_ID = re.compile(r"[^a-z0-9_-]+")
+_TEMPLATE_VAR = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 # linuxserver.io desktop images (Selkies) serve HTTP on 3000 and HTTPS on 3001; the
 # desktop stream only works over HTTPS
 LINUXSERVER_IMAGES = ("linuxserver/", "lscr.io/linuxserver/", "ghcr.io/linuxserver/")
@@ -69,11 +72,14 @@ class StoreApp:
     web_scheme: str = "http"
     variables: list[StoreVariable] = field(default_factory=list)
     compose: str | None = None
+    # the Runtipi data folder (path in it: text), copied into APP_DATA_DIR/data
+    files: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self, with_compose: bool = True) -> dict:
         data = asdict(self)
         if not with_compose:
             data.pop("compose")
+            data.pop("files")
         return data
 
     @classmethod
@@ -101,7 +107,9 @@ class StoreApp:
 
 
 def safe_id(value: str) -> str:
-    return _SAFE_ID.sub("-", value.lower()).strip("-") or "app"
+    # accents become plain letters: Baïkal is baikal, not ba-kal
+    plain = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    return _SAFE_ID.sub("-", plain.lower()).strip("-") or "app"
 
 
 def repo_id_for(url: str) -> str:
@@ -122,6 +130,19 @@ def archive_url(url: str) -> str:
     if match := _GITHUB.match(url):
         return f"https://codeload.github.com/{match[1]}/{match[2]}/tar.gz/HEAD"
     return url
+
+
+def archive_urls(url: str, kind: str) -> list[str]:
+    """The downloads to try, in order.
+
+    A CasaOS store on GitHub publishes its apps as a small main.zip release, the
+    file CasaOS itself reads; the whole repository can be hundreds of MB of images.
+    """
+    match = _GITHUB.match(url)
+    if match and kind == KIND_CASAOS:
+        release = f"https://github.com/{match[1]}/{match[2]}/releases/latest/download/main.zip"
+        return [release, archive_url(url)]
+    return [archive_url(url)]
 
 
 def _localized(value, locale: str = "en_US") -> str:
@@ -263,6 +284,7 @@ def parse_runtipi(
     )
     if compose is None:
         return None
+    compose = _publish_main_port(compose)
 
     variables = [
         StoreVariable(
@@ -310,6 +332,24 @@ def parse_runtipi(
         variables=variables,
         compose=compose,
     )
+
+
+def _publish_main_port(compose: str) -> str:
+    """Schema v2 compose files mark the web UI with `x-runtipi: {is_main,
+    internal_port}` instead of a port; Runtipi publishes it on APP_PORT."""
+    data = yaml.safe_load(compose) or {}
+    changed = False
+    for service in (data.get("services") or {}).values():
+        meta = (isinstance(service, dict) and service.get("x-runtipi")) or {}
+        if not (meta.get("is_main") and meta.get("internal_port")):
+            continue
+        ports = service.get("ports") or []
+        if "${APP_PORT}" not in str(ports):
+            service["ports"] = [f"${{APP_PORT}}:{meta['internal_port']}", *ports]
+            changed = True
+    if not changed:
+        return compose
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 def runtipi_dynamic_to_compose(data: dict) -> dict:
@@ -398,6 +438,19 @@ def render_runtipi(app: StoreApp, project: str) -> dict:
 # --- render ---
 
 
+def render_files(app: StoreApp, env: dict[str, str]) -> dict[str, str]:
+    """The data files of an app (path in the data folder: text), as Runtipi writes
+    them: a .template file gets the {{VAR}} values and loses its suffix."""
+    return {
+        path.removesuffix(".template"): (
+            _TEMPLATE_VAR.sub(lambda m: env.get(m[1], ""), text)
+            if path.endswith(".template")
+            else text
+        )
+        for path, text in app.files.items()
+    }
+
+
 def generate_secret(length: int = 32) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(max(length, 16)))
@@ -410,8 +463,13 @@ def render_app(
     data_root: str,
     values: dict[str, str],
     defaults: dict[str, str],
+    rename_containers: bool = True,
 ) -> tuple[str, dict[str, str]]:
-    """Return (compose text, env values) for an install or package update."""
+    """Return (compose text, env values) for an install or package update.
+
+    `rename_containers` is off for package updates of apps installed before fixed
+    container names were renamed, so their containers keep their names.
+    """
     env = dict(defaults)
     if app.kind == KIND_CASAOS:
         data = render_casaos(app, project, data_dir, data_root)
@@ -431,6 +489,8 @@ def render_app(
                 "APP_EXPOSED": "false",
             }
         )
+    if rename_containers and project not in (app.app_id, safe_id(app.name)):
+        _rename_containers(data, app.app_id, project)
     _drop_desktop_http_port(data)
     for variable in app.variables:
         value = values.get(variable.key)
@@ -444,6 +504,33 @@ def render_app(
     for key, value in values.items():
         env.setdefault(key, str(value))
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True), env
+
+
+def _rename_containers(data: dict, app_id: str, project: str) -> None:
+    """Fixed container names of an app installed under another name, so they don't
+    clash with a container that already has that name. The old name stays an alias
+    in the app's networks, as the services may reach each other by it
+    (DB_HOST=app-db).
+    """
+    for service in (data.get("services") or {}).values():
+        old = isinstance(service, dict) and service.get("container_name")
+        if not old:
+            continue
+        # immich-db becomes photos-db; dbgate of the app db becomes photos-dbgate
+        service["container_name"] = (
+            project + old[len(app_id) :]
+            if old == app_id or old.startswith(f"{app_id}-")
+            else f"{project}-{old}"
+        )
+        if service.get("network_mode"):
+            continue
+        networks = service.get("networks") or ["default"]
+        if isinstance(networks, list):
+            networks = dict.fromkeys(networks)
+        service["networks"] = {
+            name: {**(spec or {}), "aliases": [*(spec or {}).get("aliases", []), old]}
+            for name, spec in networks.items()
+        }
 
 
 def _drop_desktop_http_port(data: dict) -> None:
@@ -541,6 +628,10 @@ def parse_archive(
         except (ValueError, KeyError, yaml.YAMLError):
             continue
         if app:
+            data = f"{folder}/data/"
+            app.files = {
+                p[len(data) :]: text for p, text in files.items() if p.startswith(data)
+            }
             if raw_url:
                 app.icon = f"{raw_url}/{folder}/metadata/logo.jpg"
             apps.append(app)
@@ -560,30 +651,42 @@ _MAX_FILE = 512 * 1024
 
 
 def _read_archive(raw: bytes, kind: str) -> dict[str, str]:
-    wanted = _WANTED[kind]
     files: dict[str, str] = {}
+
+    def add(name: str, read: Callable[[], bytes | None]) -> None:
+        path = _strip_root(name)
+        parts = path.split("/")
+        # Runtipi: apps/<id>/data/... is copied to the app's data folder; a path
+        # that could leave it (data//etc, data/../x) is left out
+        data = (
+            kind == KIND_RUNTIPI
+            and parts[2:3] == ["data"]
+            and len(parts) > 3
+            and all(p not in ("", ".", "..") for p in parts[3:])
+        )
+        if parts[-1] not in _WANTED[kind] and not data:
+            return
+        try:
+            files[path] = (read() or b"").decode(
+                "utf-8", "strict" if data else "replace"
+            )
+        except UnicodeDecodeError:
+            pass  # a binary data file: left out
+
     if raw[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             for info in archive.infolist():
-                if (
-                    info.filename.rsplit("/", 1)[-1] in wanted
-                    and info.file_size <= _MAX_FILE
-                ):
-                    files[_strip_root(info.filename)] = archive.read(info).decode(
-                        "utf-8", "replace"
-                    )
+                if not info.is_dir() and info.file_size <= _MAX_FILE:
+                    add(info.filename, lambda info=info: archive.read(info))
         return files
 
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as archive:
         for member in archive:
-            if not member.isfile() or member.size > _MAX_FILE:
-                continue
-            if member.name.rsplit("/", 1)[-1] in wanted:
-                file = archive.extractfile(member)
-                if file:
-                    files[_strip_root(member.name)] = file.read().decode(
-                        "utf-8", "replace"
-                    )
+            if member.isfile() and member.size <= _MAX_FILE:
+                add(
+                    member.name,
+                    lambda m=member: (f := archive.extractfile(m)) and f.read(),
+                )
     return files
 
 

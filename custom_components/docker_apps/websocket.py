@@ -171,14 +171,8 @@ def ws_store(
 ) -> None:
     _, runtime = get_runtime(hass)
     catalog = runtime.catalog
-    arch = runtime.docker.data.host.arch
-    # an app whose containers were removed is not installed, even with settings left
-    apps = runtime.docker.data.apps
-    installed = {
-        s.store_app_id: key
-        for key, s in runtime.manager.settings.items()
-        if s.store and key in apps
-    }
+    data = runtime.docker.data
+    arch = data.host.arch
     installing = {store_id: key for key, store_id in runtime.manager.installing.items()}
     connection.send_result(
         msg["id"],
@@ -191,13 +185,15 @@ def ws_store(
                 {
                     "id": a.id,
                     "repo_id": a.repo_id,
+                    "app_id": a.app_id,
                     "name": a.name,
                     "tagline": a.tagline,
                     "icon": a.icon,
                     "categories": a.categories,
                     "version": a.version,
                     "supported": a.supports(arch),
-                    "installed": installed.get(a.id),
+                    # one copy per app, from any repository
+                    "installed": runtime.manager.installed_as(a, data),
                     "installing": installing.get(a.id),
                 }
                 for a in sorted(catalog.apps.values(), key=lambda a: a.name.lower())
@@ -234,6 +230,7 @@ async def ws_store_app(
         vol.Required("type"): f"{DOMAIN}/store/ports",
         vol.Required("app_id"): str,
         vol.Optional("web_port"): vol.All(vol.Coerce(int), vol.Range(1, 65535)),
+        vol.Optional("name"): str,
     }
 )
 @websocket_api.require_admin
@@ -241,7 +238,7 @@ async def ws_store_app(
 async def ws_store_ports(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
-    """Check the ports of a store app again, for another web port."""
+    """Check the ports and name of a store app again, for another web port or name."""
     _, runtime = get_runtime(hass)
     try:
         app = runtime.catalog.get(msg["app_id"])
@@ -251,7 +248,7 @@ async def ws_store_ports(
     connection.send_result(
         msg["id"],
         await runtime.manager.async_check_ports(
-            app, runtime.docker.data, msg.get("web_port")
+            app, runtime.docker.data, msg.get("web_port"), msg.get("name")
         ),
     )
 
@@ -275,7 +272,7 @@ async def ws_app_environment(
     except (AppError, ComposeError, OSError) as err:
         connection.send_error(msg["id"], websocket_api.ERR_UNKNOWN_ERROR, str(err))
         return
-    connection.send_result(msg["id"], {"services": environment})
+    connection.send_result(msg["id"], environment)
 
 
 @websocket_api.websocket_command(

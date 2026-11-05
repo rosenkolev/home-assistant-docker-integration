@@ -76,6 +76,21 @@ async def test__install_writes_files_and_starts_containers(manager, tmp_path):
     assert settings.managed and settings.store["package_version"] == "3"
 
 
+async def test__install_copies_the_data_folder_but_keeps_user_files(manager, tmp_path):
+    app = store_app("1.10.0", 3)
+    app.files = {"config.yaml": "new", "users.yml.template": "secret: {{SECRET}}"}
+    data_dir = tmp_path / "data" / "whoami" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "config.yaml").write_text("mine", encoding="utf-8")
+
+    await manager.async_install_store_app(app, data=await manager.client.async_fetch())
+
+    assert (data_dir / "config.yaml").read_text(encoding="utf-8") == "mine"
+    env = (tmp_path / "apps" / "whoami" / ".env").read_text(encoding="utf-8")
+    secret = next(line[7:] for line in env.splitlines() if line.startswith("SECRET="))
+    assert (data_dir / "users.yml").read_text(encoding="utf-8") == f"secret: {secret}"
+
+
 async def test__package_update_keeps_secrets_and_override(manager, tmp_path):
     data = await manager.client.async_fetch()
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
@@ -129,22 +144,145 @@ async def test__failed_install_leaves_nothing_behind(manager, tmp_path, monkeypa
 
     monkeypatch.setattr(docker, "async_container_action", start_fails)
     data = await docker.async_fetch()
+    app = store_app("1.10.0", 3)
+    app.files = {"config.yaml": "default"}
     with pytest.raises(AppError, match="already allocated"):
-        await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+        await manager.async_install_store_app(app, data=data)
 
     assert not docker.containers
     assert not (tmp_path / "apps" / "whoami").exists()
+    assert not (tmp_path / "data" / "whoami").exists()
     assert "whoami" not in manager.settings
 
 
-async def test__app_removed_outside_can_be_installed_again(manager):
+def secret(tmp_path) -> str:
+    env = (tmp_path / "apps" / "whoami" / ".env").read_text(encoding="utf-8")
+    return next(line for line in env.splitlines() if line.startswith("SECRET="))
+
+
+async def test__app_removed_outside_is_installed_again_with_its_secrets(
+    manager, tmp_path
+):
     data = await manager.client.async_fetch()
-    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    await manager.async_install_store_app(
+        store_app("1.10.0", 3), values={"APP_PORT": "8123"}, data=data
+    )
+    before = secret(tmp_path)
     manager.client.containers.clear()  # pruned while stopped
     data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
+    assert ports["reinstall"] and not ports["name_error"]
+    assert ports["web_port"] == 8123  # the port chosen before
 
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
     assert manager.client.containers
+    assert secret(tmp_path) == before
+    assert manager.get("whoami").store["web_port"] == "8123"
+
+
+async def test__reinstall_dialog_gets_the_earlier_answers_but_no_secrets(manager):
+    fields = [
+        *CONFIG["form_fields"],
+        {"type": "text", "label": "User", "env_variable": "USER", "default": "admin"},
+    ]
+    app = parse_runtipi(
+        json.dumps({**CONFIG, "form_fields": fields}), COMPOSE, None, "tipi"
+    )
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(app, values={"USER": "me"}, data=data)
+    manager.client.containers.clear()
+    data = await manager.client.async_fetch()
+
+    ports = await manager.async_check_ports(app, data)
+    assert ports["values"] == {"USER": "me"}  # SECRET is generated: not sent
+
+
+async def test__an_app_is_installed_once_from_any_repository(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    other = parse_runtipi(json.dumps(CONFIG), COMPOSE, None, "other")
+
+    ports = await manager.async_check_ports(other, data, name="whoami-2")
+    assert ports["name_error"] == "Whoami is already installed as whoami."
+    for app, name in ((store_app("1.10.0", 3), "whoami-2"), (other, "whoami-2")):
+        with pytest.raises(AppError, match="already installed as whoami"):
+            await manager.async_install_store_app(app, name, data=data)
+
+
+async def test__uninstall_works_when_the_files_were_deleted(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    (tmp_path / "apps" / "whoami" / "compose.yaml").unlink()
+    data = await manager.client.async_fetch()
+
+    await manager.async_uninstall(data.apps["whoami"], data)
+    assert not manager.client.containers
+
+
+async def test__install_never_writes_a_folder_of_someone_else(manager, tmp_path):
+    compose = tmp_path / "apps" / "whoami" / "compose.yaml"
+    compose.parent.mkdir(parents=True)
+    compose.write_text("mine")  # a project taken down with docker compose down
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
+    assert "not installed from an app store" in ports["name_error"]
+
+    message = "`.*/apps/whoami` has files that were not installed from an app store"
+    with pytest.raises(AppError, match=message):
+        await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert compose.read_text() == "mine"
+    assert sorted(p.name for p in compose.parent.iterdir()) == ["compose.yaml"]
+
+
+async def test__install_refuses_the_folder_of_the_app_from_another_store(
+    manager, tmp_path
+):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    manager.client.containers.clear()
+    data = await manager.client.async_fetch()
+    other = parse_runtipi(json.dumps(CONFIG), COMPOSE, None, "other")
+
+    with pytest.raises(
+        AppError, match="holds `Whoami` from another repository, `tipi`"
+    ):
+        await manager.async_install_store_app(other, data=data)
+
+    config = {**CONFIG, "id": "echo", "name": "Echo"}
+    another = parse_runtipi(json.dumps(config), COMPOSE, None, "tipi")
+    with pytest.raises(AppError, match="holds another app, `Whoami`"):
+        await manager.async_install_store_app(another, "whoami", data=data)
+
+    # the same app under an id from before accents became plain letters
+    manifest = tmp_path / "apps" / "whoami" / ".docker-apps" / "manifest.json"
+    manifest.write_text(
+        json.dumps({"repo_id": "tipi", "app_id": "wh-ami", "name": "Whoami"})
+    )
+    assert await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+
+
+async def test__install_refuses_a_file_where_the_folder_goes(manager, tmp_path):
+    (tmp_path / "apps").mkdir()
+    (tmp_path / "apps" / "whoami").write_text("a file")
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
+    assert "not installed from an app store" in ports["name_error"]
+
+
+async def test__failed_reinstall_keeps_the_folder(manager, tmp_path, monkeypatch):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    manager.client.containers.clear()
+    data = await manager.client.async_fetch()
+
+    async def apply_fails(*args, **kwargs):
+        raise DockerError(500, "no space left")
+
+    monkeypatch.setattr(manager, "_async_apply", apply_fails)
+    with pytest.raises(AppError, match="no space left"):
+        await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert (tmp_path / "apps" / "whoami" / ".env").exists()
 
 
 async def test__uninstall_with_data_removes_folders(manager, tmp_path):
@@ -242,10 +380,25 @@ async def test__set_environment_keeps_the_change_in_the_override(manager, tmp_pa
     override = (folder / "compose.override.yaml").read_text(encoding="utf-8")
     assert override.startswith("# Your changes") and "PASSWORD: pa$$s" in override
     environment = await manager.async_environment(app)
-    assert environment["whoami"]["PASSWORD"] == "pa$s"
-    assert "SECRET" in environment["whoami"]  # the store's own variables stay
+    assert environment["services"]["whoami"]["PASSWORD"] == "pa$s"
+    assert "SECRET" in environment["services"]["whoami"]  # the store's own stay
+    assert environment["custom"]["whoami"] == ["PASSWORD"]
     container = next(iter(manager.client.containers.values()))
     assert "PASSWORD=pa$s" in container["Config"]["Env"]
+
+    # a variable of the user is removed; one of the app gets its value back
+    await manager.async_set_environment(app, "whoami", {"SECRET": "mine"}, data)
+    environment = await manager.async_environment(app)
+    original = environment["changed"]["whoami"]["SECRET"]  # to reset to
+    assert original not in ("mine", None)
+    await manager.async_set_environment(
+        app, "whoami", {}, data, remove=["PASSWORD", "SECRET"]
+    )
+    environment = await manager.async_environment(app)
+    assert "PASSWORD" not in environment["services"]["whoami"]
+    assert environment["services"]["whoami"]["SECRET"] == original
+    assert environment["custom"]["whoami"] == []
+    assert environment["changed"]["whoami"] == {}
 
 
 async def test__set_volumes_adds_and_removes_folders(manager, tmp_path):

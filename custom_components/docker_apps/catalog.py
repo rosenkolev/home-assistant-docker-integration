@@ -12,7 +12,7 @@ from homeassistant.helpers.storage import Store
 
 from ._store import (
     StoreApp,
-    archive_url,
+    archive_urls,
     parse_archive,
     raw_file_url,
     repo_id_for,
@@ -21,7 +21,7 @@ from .const import _LOGGER, DOMAIN
 
 STORAGE_VERSION = 1
 # bump when parsing changes, so cached catalogs are downloaded again
-CATALOG_FORMAT = 3
+CATALOG_FORMAT = 4
 MAX_ARCHIVE = 200 * 1024 * 1024
 TIMEOUT = aiohttp.ClientTimeout(total=300)
 
@@ -49,18 +49,26 @@ async def async_fetch_repository(
 ) -> tuple[list[StoreApp] | None, str | None]:
     """Return (apps, etag); apps is None when the repository didn't change."""
     headers = {"If-None-Match": etag} if etag else {}
-    download = archive_url(repository.url)
-    async with session.get(download, headers=headers, timeout=TIMEOUT) as resp:
-        if resp.status == 304:
-            return None, etag
-        if resp.status >= 400:
-            raise CatalogError(f"{download}: HTTP {resp.status}")
-        raw = bytearray()
-        async for chunk in resp.content.iter_chunked(1024 * 1024):
-            raw += chunk
-            if len(raw) > MAX_ARCHIVE:
-                raise CatalogError(f"{download}: archive too big")
-        new_etag = resp.headers.get("ETag")
+    urls = archive_urls(repository.url, repository.kind)
+    for download in urls:
+        async with session.get(download, headers=headers, timeout=TIMEOUT) as resp:
+            if resp.status == 404 and download != urls[-1]:
+                continue  # try the next download
+            if resp.status == 304:
+                return None, etag
+            if resp.status == 404:
+                raise CatalogError(
+                    f"{repository.url} was not found: removed, renamed or made private"
+                )
+            if resp.status >= 400:
+                raise CatalogError(f"{download}: HTTP {resp.status}")
+            raw = bytearray()
+            async for chunk in resp.content.iter_chunked(1024 * 1024):
+                raw += chunk
+                if len(raw) > MAX_ARCHIVE:
+                    raise CatalogError(f"{download}: archive too big")
+            new_etag = resp.headers.get("ETag")
+            break
     try:
         apps = await hass.async_add_executor_job(
             parse_archive,

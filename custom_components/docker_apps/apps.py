@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import socket
 import time
@@ -30,6 +31,7 @@ from ._compose import (
     load_model,
     load_yaml,
     is_bind_source,
+    parse_env_file,
     split_volume,
     untag,
 )
@@ -45,7 +47,14 @@ from ._paths import (
     write_text,
 )
 from ._registry import RegistryClient, RegistryError
-from ._store import StoreApp, format_env, published_ports, render_app, safe_id
+from ._store import (
+    StoreApp,
+    format_env,
+    published_ports,
+    render_app,
+    render_files,
+    safe_id,
+)
 from ._versions import is_floating, newest_tag, parse_tag, short_digest
 from .const import _LOGGER, DOMAIN
 
@@ -80,6 +89,16 @@ OWN_CONTAINER = re.compile(r"/containers/([0-9a-f]{64})/hostname ")
 
 class AppError(Exception):
     """An app operation failed."""
+
+
+def is_same_app(stored: dict, store_app: StoreApp) -> bool:
+    """Whether a stored app (settings or folder manifest) is this store app, from any
+    repository. An app id from before accents became plain letters (ba-kal, now
+    baikal) is known by its repository and name."""
+    return stored.get("app_id") == store_app.app_id or (
+        stored.get("repo_id") == store_app.repo_id
+        and stored.get("name") == store_app.name
+    )
 
 
 @dataclass
@@ -527,7 +546,14 @@ class AppManager:
     ) -> AppUpdate:
         settings = self.get(app_key)
         if store := settings.store:
-            store_app = catalog.get(settings.store_app_id)
+            store_app = catalog.get(settings.store_app_id) or next(
+                (
+                    a
+                    for a in catalog.values()
+                    if a.repo_id == store.get("repo_id") and is_same_app(store, a)
+                ),
+                None,
+            )
             installed = store.get("version") or store.get("package_version")
             latest = installed
             if store_app and store_app.is_newer_than(
@@ -935,18 +961,51 @@ class AppManager:
         path = f"{app.working_dir}/{OVERRIDE_FILE}"
         return path if path in app.config_files else None
 
-    async def async_environment(self, app: AppInfo) -> dict[str, dict[str, str | None]]:
-        """Environment variables of each service, as compose resolves them."""
+    async def async_environment(self, app: AppInfo) -> dict:
+        """Environment variables of each service, as compose resolves them; the ones
+        the user added (`custom`: only in compose.override.yaml); and the app's own
+        ones the user changed, with the app's value (`changed`), to reset them."""
         model = await self.async_load_model(app)
-        return {
+        environment = {
             name: as_mapping(service.get("environment"))
             for name, service in model.services.items()
         }
+        base = environment
+        if path := self.override_path(app):
+            without = await self.async_load_model(
+                app, overrides={path: "services: {}\n"}
+            )
+            base = {
+                name: as_mapping(service.get("environment"))
+                for name, service in without.services.items()
+            }
+        return {
+            "services": environment,
+            "custom": {
+                name: [key for key in env if key not in base.get(name, {})]
+                for name, env in environment.items()
+            },
+            "changed": {
+                name: {
+                    key: app_value
+                    for key, app_value in base.get(name, {}).items()
+                    if key in env and env[key] != app_value
+                }
+                for name, env in environment.items()
+            },
+        }
 
     async def async_set_environment(
-        self, app: AppInfo, service: str, values: dict[str, str], data: DockerData
+        self,
+        app: AppInfo,
+        service: str,
+        values: dict[str, str],
+        data: DockerData,
+        remove: list[str] | None = None,
     ) -> None:
-        """Change environment variables of a service and recreate it."""
+        """Change, add or remove environment variables of a service and recreate it.
+        Removing one from the override puts back the value of the app's compose file,
+        if it has one."""
 
         def change(spec: dict, _override: dict) -> None:
             environment = as_mapping(spec.get("environment"))
@@ -954,7 +1013,12 @@ class AppManager:
             environment.update(
                 {key: str(value).replace("$", "$$") for key, value in values.items()}
             )
-            spec["environment"] = environment
+            for key in remove or []:
+                environment.pop(key, None)
+            if environment:
+                spec["environment"] = environment
+            else:
+                spec.pop("environment", None)
 
         await self._async_edit_override(app, service, change, data)
 
@@ -1146,6 +1210,17 @@ class AppManager:
 
     # --- store ---
 
+    def installed_as(self, store_app: StoreApp, data: DockerData) -> str | None:
+        """The app a store app is installed as, from any repository: one copy per app."""
+        return next(
+            (
+                key
+                for key, s in self.settings.items()
+                if s.store and is_same_app(s.store, store_app) and key in data.apps
+            ),
+            None,
+        )
+
     def store_paths(self, app_key: str) -> tuple[str, str]:
         return f"{self.apps_root}/{app_key}", f"{self.data_root}/{app_key}"
 
@@ -1161,7 +1236,7 @@ class AppManager:
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
         app_key = safe_id(app_key or store_app.name)
-        app_dir, _ = self.store_paths(app_key)
+        app_dir, data_dir = self.store_paths(app_key)
         self.local_path(app_dir)  # fail early when not mounted
         compose_path = f"{app_dir}/compose.yaml"
         override_path = f"{app_dir}/{OVERRIDE_FILE}"
@@ -1179,15 +1254,30 @@ class AppManager:
             installed = self.get(app_key).store
             if is_update and installed is None:
                 raise AppError(f"{app_key} was not installed from a store")
+            earlier = None  # values of an earlier install in the folder
+            new_folders: list[str] = []  # removed again when the install fails
             if not is_update:
-                # settings of an app whose containers were removed outside are stale
+                if data and (other := self.installed_as(store_app, data)):
+                    raise AppError(f"{store_app.name} is already installed as {other}")
                 if app_key in data.apps if data else installed:
                     raise AppError(f"an app named {app_key} already exists")
+                # settings of an app whose containers were removed outside are stale
                 installed = None
                 self.settings.pop(app_key, None)
-            # values chosen at install time (a web port, secrets) stay on updates
-            values = {**((installed or {}).get("values") or {}), **(values or {})}
-            compose, env = self._render(store_app, app_key, values)
+                earlier = await self._check_folder(store_app, app_dir)
+                new_folders = [app_dir] if earlier is None else []
+                if not await self._async_exists(data_dir):
+                    new_folders.append(data_dir)
+            # values chosen at install time (a web port, secrets) stay on updates,
+            # and on a reinstall into the folder of an earlier install
+            values = {
+                **((installed or {}).get("values") or {}),
+                **(earlier or {}),
+                **(values or {}),
+            }
+            # apps installed before fixed container names were renamed keep them
+            rename = installed.get("renamed_containers", False) if installed else True
+            compose, env = self._render(store_app, app_key, values, rename)
             if data is not None and not is_update:
                 wanted = published_ports(interpolate(compose, env))
                 if conflicts := await self._async_ports_in_use(
@@ -1209,12 +1299,14 @@ class AppManager:
             else:
                 self.installing[app_key] = store_app.id
             try:
-                await self._write(compose_path, compose)
-                await self._write(env_path, format_env(env))
+                # first, so a folder left by a crash is known as ours
                 await self._write(
                     f"{app_dir}/{META_DIR}/manifest.json",
                     json.dumps(store_app.as_dict(with_compose=False), indent=2),
                 )
+                await self._write(compose_path, compose)
+                await self._write(env_path, format_env(env))
+                await self._async_write_data_files(store_app, app_key, env)
                 if await self._read(override_path) is None:
                     await self._write(
                         override_path, f"{OVERRIDE_HEADER}services: {{}}\n"
@@ -1223,8 +1315,9 @@ class AppManager:
                 await self._async_apply(app_key, model, data, pull=True)
             except (AppError, ComposeError, DockerError, OSError) as err:
                 if backup is None:
-                    # a failed first install leaves nothing behind, so it can be retried
-                    await self._async_discard_install(app_key, app_dir)
+                    # a failed first install leaves nothing behind, so it can be
+                    # retried; a reinstall keeps the folders that were there
+                    await self._async_discard_install(app_key, new_folders)
                     raise
                 await self._async_restore(app, backup, data)
                 raise AppError(f"update failed and was rolled back: {err}") from err
@@ -1247,12 +1340,47 @@ class AppManager:
                 "web_path": store_app.web_path,
                 "web_target": store_app.web_target,
                 "web_scheme": store_app.web_scheme,
+                "renamed_containers": rename,
             }
             await self.async_save()
         return app_key
 
+    async def _async_write_data_files(
+        self, store_app: StoreApp, app_key: str, env: dict[str, str]
+    ) -> None:
+        """Files the app needs in its data folder (a default config). A file that is
+        there already is the user's, from an earlier install or edit: it stays."""
+        files = render_files(store_app, env)
+        if not files:
+            return
+        data_dir = os.path.realpath(
+            self.local_path(f"{self.store_paths(app_key)[1]}/data")
+        )
+
+        def write() -> None:
+            for path, text in files.items():
+                target = os.path.realpath(os.path.join(data_dir, path))
+                if not target.startswith(data_dir + os.sep) or os.path.exists(target):
+                    continue  # outside the data folder, or the user's file
+                folders, folder = [], os.path.dirname(target)
+                while not os.path.exists(folder):
+                    folders.append(folder)
+                    folder = os.path.dirname(folder)
+                write_text(target, text)
+                # writable for the user the app runs as, as Runtipi does: apps
+                # change their config files and create files (a database) here
+                os.chmod(target, 0o666)
+                for folder in folders:
+                    os.chmod(folder, 0o777)
+
+        await self.hass.async_add_executor_job(write)
+
     def _render(
-        self, store_app: StoreApp, app_key: str, values: dict[str, str]
+        self,
+        store_app: StoreApp,
+        app_key: str,
+        values: dict[str, str],
+        rename_containers: bool = True,
     ) -> tuple[str, dict[str, str]]:
         return render_app(
             store_app,
@@ -1265,6 +1393,7 @@ class AppManager:
                 "PUID": "1000",
                 "PGID": "1000",
             },
+            rename_containers,
         )
 
     async def _async_ports_in_use(
@@ -1279,18 +1408,40 @@ class AppManager:
         return busy
 
     async def async_check_ports(
-        self, store_app: StoreApp, data: DockerData, web_port: int | None = None
+        self,
+        store_app: StoreApp,
+        data: DockerData,
+        web_port: int | None = None,
+        name: str | None = None,
     ) -> dict:
-        """Ports of a store app before installing: which are taken, and a free web port.
+        """Ports and name of a store app before installing: which ports are taken,
+        a free web port, and whether the name is taken or an earlier install.
 
         The web port can be changed in the install dialog; other ports are fixed in
         the compose file, so a taken one blocks the install.
         """
         if store_app.compose is None:
             return {"busy": [], "web_port": None}
-        web = web_port or store_app.web_port
+        key = safe_id(name or store_app.name)
+        name_error, earlier = None, None
+        if other := self.installed_as(store_app, data):
+            name_error = f"{store_app.name} is already installed as {other}."
+        elif key in data.apps:
+            name_error = f"An app named {key} already exists. Choose another name."
+        else:
+            try:
+                earlier = await self._check_folder(store_app, self.store_paths(key)[0])
+            except AppError as err:
+                name_error = str(err)
+        # a reinstall offers the web port of the earlier install
+        earlier_port = (earlier or {}).get("APP_PORT", "")
+        web = (
+            web_port
+            or (int(earlier_port) if earlier_port.isdigit() else None)
+            or store_app.web_port
+        )
         values = {"APP_PORT": str(web)} if web else {}
-        compose, env = self._render(store_app, safe_id(store_app.name), values)
+        compose, env = self._render(store_app, key, values)
         wanted = published_ports(interpolate(compose, env))
         published = published_host_ports(data)
         busy = await self._async_ports_in_use(wanted, published)
@@ -1314,15 +1465,69 @@ class AppManager:
             "web_port": free,
             "web_port_taken": bool(web and web in busy),
             "requested_web_port": web,
+            "name_error": name_error,
+            "reinstall": earlier is not None,
+            # the dialog shows these instead of the store defaults; generated
+            # secrets are not asked, so they don't leave the server
+            "values": {
+                v.key: earlier[v.key]
+                for v in store_app.variables
+                if earlier and v.type != "random" and v.key in earlier
+            },
         }
 
-    async def _async_discard_install(self, app_key: str, app_dir: str) -> None:
-        """Remove the containers, networks and files of a failed first install."""
+    async def _check_folder(
+        self, store_app: StoreApp, app_dir: str
+    ) -> dict[str, str] | None:
+        """Whether a store app can go into this folder: None when the folder is
+        missing or empty. A folder with the manifest of the same store app is an
+        earlier install (removed keeping its files, pruned, or copied from another
+        server): its values (passwords, web port) are returned to be kept. Any other
+        folder belongs to someone else and is never written: AppError.
+        """
+        local = self.local_path(app_dir)
+
+        def check() -> dict[str, str] | None:
+            if not os.path.exists(local) or (
+                os.path.isdir(local) and not os.listdir(local)
+            ):
+                return None
+            try:
+                owner = json.loads(read_text(f"{local}/{META_DIR}/manifest.json") or "")
+            except (ValueError, OSError):  # OSError: the path is a file
+                owner = {}
+            if not isinstance(owner, dict) or not owner.get("app_id"):
+                problem = "has files that were not installed from an app store"
+            elif not is_same_app(owner, store_app):
+                problem = f"holds another app, `{owner.get('name') or owner['app_id']}`"
+            elif owner.get("repo_id") != store_app.repo_id:
+                problem = (
+                    f"holds `{owner.get('name') or owner['app_id']}` "
+                    f"from another repository, `{owner.get('repo_id')}`"
+                )
+            else:
+                env = parse_env_file(read_text(f"{local}/.env") or "")
+                keys = {v.key for v in store_app.variables} | {"APP_PORT"}
+                return {k: v for k, v in env.items() if k in keys}
+            raise AppError(f"The folder `{app_dir}` {problem}. Choose another name.")
+
+        return await self.hass.async_add_executor_job(check)
+
+    async def _async_exists(self, host_path: str) -> bool:
+        """Whether a folder exists; an unmounted one counts as existing (not ours)."""
+        local = self.paths.to_local(host_path)
+        return local is None or await self.hass.async_add_executor_job(
+            os.path.exists, local
+        )
+
+    async def _async_discard_install(self, app_key: str, folders: list[str]) -> None:
+        """Remove the containers, networks and new folders of a failed install."""
         try:
             await self.engine.async_down(app_key)
-            await self.hass.async_add_executor_job(
-                remove_tree, self.local_path(app_dir)
-            )
+            for folder in folders:
+                await self.hass.async_add_executor_job(
+                    remove_tree, self.local_path(folder)
+                )
         except (AppError, DockerError, OSError) as err:
             _LOGGER.warning("Clean-up after the failed install of %s: %s", app_key, err)
 
@@ -1339,9 +1544,9 @@ class AppManager:
             else []
         )
         async with self._operation(app.key, "uninstall"):
-            if app.is_compose and self.can_edit(app):
-                model = await self.async_load_model(app)
-                await self.engine.async_down(model.project, remove_data)
+            if app.is_compose:
+                # by the project label: works when the compose files were deleted
+                await self.engine.async_down(app.project, remove_data)
             else:
                 for container in data.app_containers(app.key):
                     await self.engine.async_remove(container.id, remove_data)

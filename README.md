@@ -48,9 +48,10 @@ Manage your Docker apps from Home Assistant, like the Apps page of Home Assistan
 
 ## Installation
 
-1. In HACS, open **Custom repositories** and add `https://github.com/rosenkolev/home-assistant-docker-integration` as **Integration**.
-1. Install **Docker Apps** and restart Home Assistant.
+1. In HACS, search for **Docker Apps**, install it and restart Home Assistant.
 1. Go to **Settings > Devices & services > Add integration > Docker Apps**.
+
+Not listed in HACS yet? Open **Custom repositories**, add `https://github.com/rosenkolev/home-assistant-docker-integration` as **Integration**, then install **Docker Apps**.
 
 Manual: copy `custom_components/docker_apps` into your `config/custom_components` folder and restart.
 

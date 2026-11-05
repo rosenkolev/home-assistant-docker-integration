@@ -302,6 +302,10 @@
         "variables": {
           "name": "Променливи",
           "description": "Променливи за задаване, например PASSWORD: my-secret."
+        },
+        "remove": {
+          "name": "Премахване",
+          "description": "Променливи за премахване от compose.override.yaml. Променлива от compose файла на приложението си връща първоначалната стойност."
         }
       }
     },

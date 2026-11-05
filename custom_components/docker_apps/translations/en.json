@@ -302,6 +302,10 @@
         "variables": {
           "name": "Variables",
           "description": "Variables to set, for example PASSWORD: my-secret."
+        },
+        "remove": {
+          "name": "Remove",
+          "description": "Variables to remove from compose.override.yaml. A variable of the app's compose file gets its original value back."
         }
       }
     },

@@ -1,4 +1,4 @@
-# cspell:words appstore icewhale riscv
+# cspell:words appstore Baïkal gtstef icewhale immichadmin kodi riscv
 
 import io
 import json
@@ -17,7 +17,9 @@ from custom_components.docker_apps._store import (
     parse_runtipi,
     published_ports,
     render_app,
+    render_files,
     runtipi_dynamic_to_compose,
+    safe_id,
 )
 
 CASAOS = """
@@ -151,6 +153,32 @@ def test__parse_runtipi_and_render():
     assert env["NAME"] == "home"
 
 
+def test__render_under_another_name_renames_fixed_containers():
+    data = yaml.safe_load(TIPI_COMPOSE)
+    data["services"]["immich"]["container_name"] = "immich"
+    data["services"]["db"] = {"image": "postgres:16", "container_name": "db-of-immich"}
+    data["services"]["ml"] = {"image": "ml:1", "container_name": "immich-ml"}
+    data["services"]["admin"] = {"image": "a:1", "container_name": "immichadmin"}
+    app = parse_runtipi(TIPI_CONFIG, yaml.safe_dump(data), None, "tipi")
+
+    default = yaml.safe_load(render_app(app, "immich", "/d", "/", {}, {})[0])
+    assert default["services"]["immich"]["container_name"] == "immich"
+
+    services = yaml.safe_load(render_app(app, "photos", "/d", "/", {}, {})[0])[
+        "services"
+    ]
+    assert services["immich"]["container_name"] == "photos"
+    assert services["immich"]["networks"] == {"default": {"aliases": ["immich"]}}
+    assert services["db"]["container_name"] == "photos-db-of-immich"
+    assert services["db"]["networks"] == {"default": {"aliases": ["db-of-immich"]}}
+    assert services["ml"]["container_name"] == "photos-ml"
+    assert services["admin"]["container_name"] == "photos-immichadmin"
+
+    # a package update of an app installed before the rename keeps the names
+    kept = render_app(app, "photos", "/d", "/", {}, {}, rename_containers=False)[0]
+    assert yaml.safe_load(kept)["services"]["db"]["container_name"] == "db-of-immich"
+
+
 def test__render_keeps_stored_secrets():
     app = parse_runtipi(TIPI_CONFIG, TIPI_COMPOSE, None, "tipi")
     _, env = render_app(app, "immich", "/d", "/", {"DB_PASSWORD": "kept"}, {})
@@ -183,11 +211,11 @@ def test__runtipi_dynamic_compose():
     assert service["volumes"] == ["${APP_DATA_DIR}/config:/config"]
 
 
-def _tar(files: dict[str, str]) -> bytes:
+def _tar(files: dict[str, str | bytes]) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
         for name, content in files.items():
-            raw = content.encode()
+            raw = content if isinstance(content, bytes) else content.encode()
             info = tarfile.TarInfo(name)
             info.size = len(raw)
             tar.addfile(info, io.BytesIO(raw))
@@ -216,9 +244,61 @@ def test__parse_archive_casaos_and_runtipi():
     assert apps[0].icon == "https://raw.example/o/r/HEAD/apps/immich/metadata/logo.jpg"
 
 
+def test__runtipi_schema_v2_main_service_is_published_on_app_port():
+    compose = """
+x-runtipi:
+  schema_version: 2
+services:
+  web:
+    image: gtstef/filebrowser:2.0-stable
+    x-runtipi:
+      internal_port: 80
+      is_main: true
+  db:
+    image: postgres:16
+"""
+    app = parse_runtipi(TIPI_CONFIG, compose, None, "tipi")
+    services = yaml.safe_load(app.compose)["services"]
+    assert services["web"]["ports"] == ["${APP_PORT}:80"]
+    assert "ports" not in services["db"]
+    assert app.web_target == 80
+
+
+def test__parse_archive_keeps_the_runtipi_data_folder():
+    tipi = _tar(
+        {
+            "appstore-master/apps/immich/config.json": TIPI_CONFIG,
+            "appstore-master/apps/immich/docker-compose.yml": TIPI_COMPOSE,
+            "appstore-master/apps/immich/data/config.yaml": "server: {}\n",
+            "appstore-master/apps/immich/data/conf/users.yml.template": "pw: {{ PW }}",
+            "appstore-master/apps/immich/data/logo.png": b"\x89PNG\xff\xfe",
+            # paths that would leave the data folder are left out
+            "appstore-master/apps/immich/data//etc/evil": "x",
+            "appstore-master/apps/immich/data/../evil": "x",
+            "appstore-master/apps/immich/data/./evil": "x",
+        }
+    )
+    app = parse_archive(tipi, KIND_RUNTIPI, "r")[0]
+    assert app.files == {
+        "config.yaml": "server: {}\n",
+        "conf/users.yml.template": "pw: {{ PW }}",
+    }
+    assert render_files(app, {"PW": "secret"}) == {
+        "config.yaml": "server: {}\n",
+        "conf/users.yml": "pw: secret",
+    }
+    assert "files" not in app.as_dict(with_compose=False)
+
+
 def test__store_app_roundtrip():
     app = parse_runtipi(TIPI_CONFIG, TIPI_COMPOSE, None, "tipi")
     assert StoreApp.from_dict(app.as_dict()) == app
+
+
+def test__safe_id_turns_accents_into_plain_letters():
+    assert safe_id("Baïkal") == "baikal"
+    assert safe_id("Kodi Café") == "kodi-cafe"
+    assert safe_id("日本") == "app"
 
 
 def test__archive_url_and_env_format():

@@ -111,7 +111,9 @@ set_environment:
       selector:
         text:
     variables:
-      required: true
+      selector:
+        object:
+    remove:
       selector:
         object:
 set_volumes:

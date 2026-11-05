@@ -71,8 +71,8 @@ def casaos_archive() -> bytes:
 class FakeResponse:
     """An HTTP response whose body arrives in small chunks, like a real download."""
 
-    def __init__(self, body: bytes):
-        self.status = 200
+    def __init__(self, body: bytes, status: int = 200):
+        self.status = status
         self.headers = {}
         self.content = self
         self._body = body
@@ -89,11 +89,14 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, missing: tuple[str, ...] = ()):
         self.body = body
+        self.missing = missing
+        self.urls = []
 
     def get(self, url, **kwargs):
-        return FakeResponse(self.body)
+        self.urls.append(url)
+        return FakeResponse(self.body, 404 if url.endswith(self.missing) else 200)
 
 
 class FakeHass:
@@ -106,6 +109,27 @@ async def test__archive_is_read_in_full():
         FakeSession(casaos_archive()), FakeHass(), CASAOS
     )
     assert [a.app_id for a in apps] == ["whoami"]
+
+
+async def test__casaos_store_is_read_from_its_release_zip():
+    session = FakeSession(casaos_archive())
+    await async_fetch_repository(session, FakeHass(), CASAOS)
+    assert session.urls == [
+        "https://github.com/IceWhaleTech/CasaOS-AppStore/releases/latest/download/main.zip"
+    ]
+
+
+async def test__store_without_release_zip_is_read_from_the_repository():
+    session = FakeSession(casaos_archive(), missing=("main.zip",))
+    apps, _ = await async_fetch_repository(session, FakeHass(), CASAOS)
+    assert [a.app_id for a in apps] == ["whoami"]
+    assert session.urls[-1].endswith("/tar.gz/HEAD")
+
+
+async def test__removed_repository_is_explained():
+    session = FakeSession(b"", missing=("main.zip", "HEAD"))
+    with pytest.raises(CatalogError, match="removed, renamed or made private"):
+        await async_fetch_repository(session, FakeHass(), CASAOS)
 
 
 async def test__broken_archive_is_a_repository_error():
