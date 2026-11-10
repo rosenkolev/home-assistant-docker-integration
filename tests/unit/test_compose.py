@@ -370,6 +370,19 @@ async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
     assert "immich_default" not in docker.networks
 
 
+async def test__down_with_volumes_keeps_a_volume_another_container_uses():
+    docker = FakeDocker()
+    engine = ComposeEngine(docker)
+    label = {"com.docker.compose.project": "immich"}
+    docker.volumes = {
+        "immich_db": {"Name": "immich_db", "Labels": label},
+        "immich_shared": {"Name": "immich_shared", "Labels": label, "InUse": True},
+        "other_db": {"Name": "other_db", "Labels": {}},
+    }
+    await engine.async_down("immich", volumes=True)
+    assert sorted(docker.volumes) == ["immich_shared", "other_db"]
+
+
 def test__environment_list_and_map_merge_by_key():
     base = {"services": {"app": {"environment": ["A=1", "B=2"]}}}
     override = {"services": {"app": {"environment": {"B": "3", "C": "4"}}}}

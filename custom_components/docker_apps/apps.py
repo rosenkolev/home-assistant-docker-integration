@@ -85,10 +85,30 @@ PRIMARY_HINTS = ("server", "app", "web", "main")
 SYSTEM_PATHS = ("/proc", "/sys", "/dev", "/run", "/var/run", "/var/lib", "/etc")
 VOLUMES_CACHE_SECONDS = 60
 OWN_CONTAINER = re.compile(r"/containers/([0-9a-f]{64})/hostname ")
+COMPOSE_FILES = (
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+)
 
 
 class AppError(Exception):
     """An app operation failed."""
+
+
+def compose_projects(folder: str) -> set[str]:
+    """Project names of the compose folders in a folder, with or without containers:
+    the folder name the way compose makes a project name of it."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return set()
+    return {
+        re.sub(r"[^a-z0-9_-]", "", name.lower())
+        for name in names
+        if any(os.path.isfile(os.path.join(folder, name, f)) for f in COMPOSE_FILES)
+    }
 
 
 def is_same_app(stored: dict, store_app: StoreApp) -> bool:
@@ -1117,6 +1137,33 @@ class AppManager:
                 override["volumes"] = volumes
 
         await self._async_edit_override(app, service, change, data)
+
+    async def async_prune_volumes(self, data: DockerData) -> dict:
+        """Remove the volumes no container uses, running or stopped, except those of
+        an installed app that has no containers now: a project taken down with
+        `docker compose down`, or a store app removed keeping its data. Its volumes
+        are its data; they go with the app (uninstall with its data)."""
+        installed = {app.project for app in data.apps.values()} | set(self.settings)
+        if local := self.paths.to_local(self.apps_root):
+            installed |= await self.hass.async_add_executor_job(compose_projects, local)
+        df = await self.client.async_system_df()
+        removed, space = 0, 0
+        for volume in df.get("Volumes") or []:
+            usage = volume.get("UsageData") or {}
+            project = (volume.get("Labels") or {}).get(LABEL_PROJECT)
+            # -1: Docker didn't count the containers, so it counts as used
+            if usage.get("RefCount", -1) != 0 or (project and project in installed):
+                continue
+            try:
+                await self.client.async_volume_remove(volume["Name"])
+            except DockerError as err:
+                if err.status == 409:  # a container started using it meanwhile
+                    continue
+                raise
+            removed += 1
+            space += max(usage.get("Size", 0), 0)
+        self._volumes_cache = None
+        return {"space_reclaimed": space, "removed": removed}
 
     async def async_volume_suggestions(self, data: DockerData) -> dict:
         """Folders and volumes to offer when adding a mount to an app.

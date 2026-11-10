@@ -38,8 +38,8 @@ PRUNE = {
     "containers_apps": ("containers", None),
     "images": ("images", {"dangling": ["true"]}),
     "images_unused": ("images", {"dangling": ["false"]}),
-    # Docker 23+ only prunes anonymous volumes unless all=true
-    "volumes": ("volumes", {"all": ["true"]}),
+    # one by one, so volumes of installed apps without containers stay
+    "volumes": ("volumes", None),
     "networks": ("networks", None),
     "build_cache": ("build", None),
 }
@@ -185,6 +185,12 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def _async_prune(runtime: DockerAppsRuntime, kind: str) -> ServiceResponse:
         resource, filters = PRUNE[kind]
+        if resource == "volumes":
+            result = await _call(
+                runtime.manager.async_prune_volumes(runtime.docker.data)
+            )
+            await runtime.disk.async_refresh()
+            return result
         # ImagesDeleted lists every layer too, so images are counted before and after
         if resource == "images":
             before = len(await _call(runtime.client.async_images()))

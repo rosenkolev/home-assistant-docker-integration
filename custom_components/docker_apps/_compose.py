@@ -1158,5 +1158,12 @@ class ComposeEngine:
                     _LOGGER.debug("Network %s kept: %s", network["Name"], err)
         if volumes:
             for volume in await self.client.async_volumes():
-                if (volume.get("Labels") or {}).get(LABEL_PROJECT) == project:
+                if (volume.get("Labels") or {}).get(LABEL_PROJECT) != project:
+                    continue
+                try:
                     await self.client.async_volume_remove(volume["Name"])
+                except DockerError as err:
+                    if err.status != 409:
+                        raise
+                    # shared with a container of another app: it stays for that one
+                    _LOGGER.warning("Volume %s kept: %s", volume["Name"], err.message)

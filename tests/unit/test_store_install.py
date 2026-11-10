@@ -285,6 +285,30 @@ async def test__failed_reinstall_keeps_the_folder(manager, tmp_path, monkeypatch
     assert (tmp_path / "apps" / "whoami" / ".env").exists()
 
 
+async def test__prune_volumes_keeps_volumes_of_installed_apps(manager, tmp_path):
+    project = "com.docker.compose.project"
+    (tmp_path / "apps" / "mine").mkdir(parents=True)
+    (tmp_path / "apps" / "mine" / "compose.yaml").write_text("services: {}\n")
+    manager.client.volumes = {
+        name: {"Name": name, "Labels": labels, "UsageData": usage}
+        for name, labels, usage in (
+            ("orphan", {}, {"RefCount": 0, "Size": 100}),
+            ("in-use", {}, {"RefCount": 1, "Size": 100}),
+            # a project taken down: no containers, but its folder is there
+            ("mine_db", {project: "mine"}, {"RefCount": 0, "Size": 100}),
+            ("gone_db", {project: "gone"}, {"RefCount": 0, "Size": 50}),
+            ("not-counted", {}, {"RefCount": -1, "Size": -1}),
+        )
+    }
+    # a container that is no compose project (installed by hand) uses no project
+    manager.client.add_container("homeassistant", "ghcr.io/home-assistant/x:1")
+    data = await manager.client.async_fetch()
+
+    result = await manager.async_prune_volumes(data)
+    assert result == {"space_reclaimed": 150, "removed": 2}
+    assert sorted(manager.client.volumes) == ["in-use", "mine_db", "not-counted"]
+
+
 async def test__uninstall_with_data_removes_folders(manager, tmp_path):
     data = await manager.client.async_fetch()
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)

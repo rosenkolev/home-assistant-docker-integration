@@ -251,6 +251,8 @@ class FakeDocker:
 
     async def async_volume_remove(self, name: str) -> None:
         self.calls.append(("volume_remove", name))
+        if (self.volumes.get(name) or {}).get("InUse"):
+            raise DockerError(409, f"remove {name}: volume is in use")
         self.volumes.pop(name, None)
 
     async def async_networks(self) -> list[dict]:
@@ -268,6 +270,15 @@ class FakeDocker:
 
     async def async_network_remove(self, id: str) -> None:
         self.networks.pop(id, None)
+
+    async def async_system_df(self) -> dict:
+        unused = {"RefCount": 0, "Size": 0}
+        return {
+            "Volumes": [
+                {**v, "UsageData": v.get("UsageData", unused)}
+                for v in self.volumes.values()
+            ]
+        }
 
     async def async_disk_usage(self) -> DiskUsage:
         return DiskUsage(images_size=5000, images_reclaimable=2000)

@@ -163,11 +163,15 @@ class DockerClient:
     async def async_info(self) -> dict:
         return await self._json("GET", "/info")
 
-    async def async_disk_usage(self) -> DiskUsage:
-        data = await self._json(
+    async def async_system_df(self) -> dict:
+        """Disk usage of images, volumes (with how many containers use each) and
+        build cache."""
+        return await self._json(
             "GET", "/system/df", timeout=aiohttp.ClientTimeout(total=300)
         )
-        return parse_disk_usage(data)
+
+    async def async_disk_usage(self) -> DiskUsage:
+        return parse_disk_usage(await self.async_system_df())
 
     async def async_events(
         self, filters: dict[str, list[str]] | None = None

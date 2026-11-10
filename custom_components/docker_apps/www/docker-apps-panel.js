@@ -845,6 +845,9 @@ class DockerAppsPanel extends HTMLElement {
              ${kind === "containers"
                ? `<div class="muted hint">Stopped apps stay.</div>
                   <label class="toggle"><input type="checkbox" id="prune-apps"> Also remove stopped apps</label>`
+               : ""}
+             ${kind === "volumes"
+               ? `<div class="muted hint">Volumes that a container uses, running or stopped, stay. So do the volumes of installed apps without containers: a project taken down, or an app removed keeping its data.</div>`
                : ""}`,
             footer("Remove", "yes", "primary danger"),
           );
