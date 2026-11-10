@@ -17,6 +17,8 @@ from ._compose import untag, load_yaml
 _VAR = re.compile(
     r"^(?P<pre>[^$]*)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?::?-[^}]*)?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))(?P<post>[^$]*)$"
 )
+# Docker's tag grammar
+_TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 
 
 @dataclass
@@ -124,6 +126,9 @@ def update_service_tag(
     new_tag: str,
 ) -> ImageEdit:
     """Change the tag of a service image in its compose file or in the .env file."""
+    if not _TAG.fullmatch(new_tag):
+        # written into a line of the file: a line break or quote would break it
+        raise ValueError(f"'{new_tag}' is not an image tag")
     found = find_image(files, service)
     if found is None:
         raise ValueError(f"service '{service}' has no image in the compose files")

@@ -86,6 +86,14 @@ def test__update_service_tag_should_fail_for_unknown_service():
         update_service_tag(files(), None, None, "nope", "1")
 
 
+@pytest.mark.parametrize(
+    "tag", ["17\n    privileged: true", '17"', "17 # x", "-17", "", "a" * 129]
+)
+def test__update_service_tag_should_refuse_what_is_not_a_tag(tag):
+    with pytest.raises(ValueError, match="is not an image tag"):
+        update_service_tag(files(), None, None, "database", tag)
+
+
 def test__set_env_value_should_append_missing_key():
     assert set_env_value("A=1", "B", "2") == "A=1\nB=2\n"
 

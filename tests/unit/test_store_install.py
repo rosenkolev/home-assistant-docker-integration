@@ -846,3 +846,31 @@ async def test__update_check_renders_store_apps_off_the_loop(manager, monkeypatc
     await manager.async_check_updates(data, {new.id: new})
     assert "new_access" in jobs
     assert on_loop == [False]
+
+
+async def test__install_and_its_dialog_render_off_the_loop(manager, monkeypatch):
+    data = await manager.client.async_fetch()
+    run = manager.hass.async_add_executor_job
+    in_job = []
+
+    async def record(func, *args):
+        in_job.append(True)
+        try:
+            return await run(func, *args)
+        finally:
+            in_job.pop()
+
+    monkeypatch.setattr(manager.hass, "async_add_executor_job", record)
+    render = manager._render
+    on_loop = []
+
+    def watched_render(*args, **kwargs):
+        on_loop.append(not in_job)
+        return render(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_render", watched_render)
+    app = store_app("1.10.0", 3)
+    ports = await manager.async_check_ports(app, data)
+    assert ports["web_port"] and ports["access"] == []
+    await manager.async_install_store_app(app, data=data)
+    assert on_loop == [False, False]

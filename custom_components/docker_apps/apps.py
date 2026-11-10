@@ -1618,12 +1618,20 @@ class AppManager:
             }
             # apps installed before fixed container names were renamed keep them
             rename = installed.get("renamed_containers", False) if installed else True
-            compose, env = self._render(store_app, app_key, values, rename)
-            try:
-                check_env(env)  # before anything is written
-            except ValueError as err:
-                raise AppError(f"{store_app.name}: {err}") from err
-            access = self._access(compose, env, app_key)
+
+            def prepare() -> tuple[str, dict[str, str], list[str], set[int]]:
+                # rendering and parsing YAML take a while: not in the loop
+                compose, env = self._render(store_app, app_key, values, rename)
+                try:
+                    check_env(env)  # before anything is written
+                except ValueError as err:
+                    raise AppError(f"{store_app.name}: {err}") from err
+                access = self._access(compose, env, app_key)
+                return compose, env, access, published_ports(interpolate(compose, env))
+
+            compose, env, access, wanted = await self.hass.async_add_executor_job(
+                prepare
+            )
             if is_update:
                 allowed = await self._async_allowed_access(app_key)
                 new_access = [a for a in access if a not in allowed]
@@ -1635,7 +1643,6 @@ class AppManager:
             ):
                 raise HostAccessError(store_app.name, new_access, update=is_update)
             if data is not None and not is_update:
-                wanted = published_ports(interpolate(compose, env))
                 if conflicts := await self._async_ports_in_use(
                     wanted, published_host_ports(data)
                 ):
@@ -1888,13 +1895,18 @@ class AppManager:
             or store_app.web_port
         )
         values = {"APP_PORT": str(web)} if web else {}
-        compose, env = self._render(store_app, key, values)
-        try:
-            access = self._access(compose, env, key)
-        except AppError as err:
-            access = []
-            name_error = name_error or str(err)
-        wanted = published_ports(interpolate(compose, env))
+
+        def prepare() -> tuple[list[str], str | None, set[int]]:
+            # rendering and parsing YAML take a while: not in the loop
+            compose, env = self._render(store_app, key, values)
+            try:
+                access, error = self._access(compose, env, key), None
+            except AppError as err:
+                access, error = [], str(err)
+            return access, error, published_ports(interpolate(compose, env))
+
+        access, error, wanted = await self.hass.async_add_executor_job(prepare)
+        name_error = name_error or error
         published = published_host_ports(data)
         busy = await self._async_ports_in_use(wanted, published)
         free = web
