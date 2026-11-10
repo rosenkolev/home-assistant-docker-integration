@@ -48,7 +48,11 @@ def check_size(node: yaml.Node | None) -> None:
         raise YamlTooBig("nested too deep") from err
 
 
-class GuardedLoader(yaml.SafeLoader):
+# the C loader is about 8x faster; the same results, and in HA's image
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class GuardedLoader(_SafeLoader):
     """A SafeLoader that checks the size before building anything."""
 
     def get_single_node(self):

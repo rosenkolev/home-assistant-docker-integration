@@ -552,3 +552,13 @@ def test__parse_archive_reads_a_bytearray_as_downloaded():
         )
     )
     assert [a.app_id for a in parse_archive(tipi, KIND_RUNTIPI, "r")] == ["immich"]
+
+
+def test__yaml_uses_the_fast_loader_with_the_same_guard():
+    from custom_components.docker_apps._yaml import GuardedLoader
+
+    if hasattr(yaml, "CSafeLoader"):
+        assert issubclass(GuardedLoader, yaml.CSafeLoader)
+    assert load_yaml("a: !override [1]\nb: !reset\n")["a"].value == [1]
+    with pytest.raises(YamlTooBig):
+        safe_load("a: &a [*a]\n")

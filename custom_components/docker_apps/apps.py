@@ -1777,32 +1777,42 @@ class AppManager:
             raise AppError(f"{app_key}: {err}") from err
         return host_access(rendered, app_dir, self.data_root)
 
-    async def _async_allowed_access(self, app_key: str) -> list[str]:
+    def _allowed_access(self, app_key: str, store: dict) -> list[str]:
         """The access the user allowed for an installed store app; for one from
-        before this was asked, what its installed files have."""
-        store = self.get(app_key).store or {}
+        before this was asked, what its installed files have. Reads files: not
+        in the loop."""
         if store.get("access") is not None:
             return list(store["access"])
         app_dir = self.store_paths(app_key)[0]
-        compose = await self._read(f"{app_dir}/compose.yaml") or ""
-        env = parse_env_file(await self._read(f"{app_dir}/.env") or "")
+        compose = read_text(self.local_path(f"{app_dir}/compose.yaml")) or ""
+        env = parse_env_file(read_text(self.local_path(f"{app_dir}/.env")) or "")
         try:
             return self._access(compose, env, app_key)
         except AppError:
             return []
 
+    async def _async_allowed_access(self, app_key: str) -> list[str]:
+        store = dict(self.get(app_key).store or {})
+        return await self.hass.async_add_executor_job(
+            self._allowed_access, app_key, store
+        )
+
     async def async_new_access(self, app_key: str, store_app: StoreApp) -> list[str]:
         """Access the new package of an installed store app asks for beyond what
-        was allowed."""
-        store = self.get(app_key).store or {}
-        compose, env = self._render(
-            store_app,
-            app_key,
-            dict(store.get("values") or {}),
-            store.get("renamed_containers", False),
-        )
-        allowed = await self._async_allowed_access(app_key)
-        return [a for a in self._access(compose, env, app_key) if a not in allowed]
+        was allowed. Rendering and parsing take a while: not in the loop."""
+        store = dict(self.get(app_key).store or {})
+
+        def new_access() -> list[str]:
+            compose, env = self._render(
+                store_app,
+                app_key,
+                dict(store.get("values") or {}),
+                store.get("renamed_containers", False),
+            )
+            allowed = self._allowed_access(app_key, store)
+            return [a for a in self._access(compose, env, app_key) if a not in allowed]
+
+        return await self.hass.async_add_executor_job(new_access)
 
     async def async_allow_access(self, app_key: str, store_app: StoreApp) -> None:
         """Allow the access of the new package, so the update can go ahead."""

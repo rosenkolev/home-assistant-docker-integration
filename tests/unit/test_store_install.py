@@ -761,3 +761,29 @@ async def test__values_that_would_add_lines_to_env_are_refused(
         )
     assert not (tmp_path / "apps" / "whoami").exists()
     assert not manager.client.containers
+
+
+async def test__update_check_renders_store_apps_off_the_loop(manager, monkeypatch):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    jobs = []
+    run = manager.hass.async_add_executor_job
+
+    async def record(func, *args):
+        jobs.append(getattr(func, "__name__", ""))
+        return await run(func, *args)
+
+    monkeypatch.setattr(manager.hass, "async_add_executor_job", record)
+    render = manager._render
+    on_loop = []
+
+    def watched_render(*args, **kwargs):
+        on_loop.append("new_access" not in jobs[-1:])
+        return render(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_render", watched_render)
+    new = store_app("1.11.0", 4)
+    await manager.async_check_updates(data, {new.id: new})
+    assert "new_access" in jobs
+    assert on_loop == [False]
