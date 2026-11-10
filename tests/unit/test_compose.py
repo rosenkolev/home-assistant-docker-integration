@@ -1,4 +1,4 @@
-# cspell:words Blkio Cgroupns INITDB hwaccel rkmpp
+# cspell:words Blkio Cgroupns INITDB hwaccel openlist rkmpp
 
 import pytest
 
@@ -553,6 +553,26 @@ async def test__recreate_keeps_anonymous_volumes_and_labels_new_ones():
         mount["Target"]: mount["Source"] for mount in second["HostConfig"]["Mounts"]
     }
     assert reused == names
+
+
+async def test__an_image_volume_with_a_trailing_slash_is_the_mounted_folder():
+    docker = FakeDocker()
+    m = load_model(
+        "ol",
+        "/srv/ol",
+        {
+            "/srv/ol/compose.yaml": "services:\n  app:\n    image: openlist:4\n"
+            "    volumes:\n      - /srv/data/ol:/opt/openlist/data\n"
+        },
+        None,
+    )
+    docker.add_image("openlist:4")
+    docker.images["openlist:4"]["Config"] = {"Volumes": {"/opt/openlist/data/": {}}}
+    await ComposeEngine(docker).async_up(m)
+    host = next(iter(docker.containers.values()))["HostConfig"]
+    # not mounted twice (Docker refuses "Duplicate mount point")
+    assert not host.get("Mounts")
+    assert host["Binds"] == ["/srv/data/ol:/opt/openlist/data:rw"]
 
 
 async def test__down_with_volumes_keeps_a_volume_another_container_uses():

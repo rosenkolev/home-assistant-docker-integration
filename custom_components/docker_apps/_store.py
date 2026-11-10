@@ -118,6 +118,20 @@ def safe_id(value: str) -> str:
     return _SAFE_ID.sub("-", plain.lower()).strip("-") or "app"
 
 
+# a project name is part of container, network and host names (63 at most in DNS)
+MAX_APP_KEY = 63
+
+
+def name_problem(name: str) -> str | None:
+    """Why a name chosen for an app can't be its folder and project name."""
+    plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    if not _SAFE_ID.sub("", plain.lower()).strip("-"):
+        return "Use Latin letters or digits in the name."
+    if len(safe_id(name)) > MAX_APP_KEY:
+        return f"The name is too long: {MAX_APP_KEY} characters at most."
+    return None
+
+
 def repo_id_for(url: str) -> str:
     match = _GITHUB.match(url)
     base = f"{match[1]}-{match[2]}" if match else url

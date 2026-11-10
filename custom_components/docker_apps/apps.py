@@ -68,6 +68,7 @@ from ._store import (
     published_ports,
     render_app,
     render_files,
+    name_problem,
     safe_id,
 )
 from ._versions import is_floating, newest_tag, parse_tag, short_digest
@@ -1651,6 +1652,8 @@ class AppManager:
         """
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
+        if app_key and not is_update and (problem := name_problem(app_key)):
+            raise AppError(problem)
         app_key = safe_id(app_key or store_app.name)
         app_dir, data_dir = self.store_paths(app_key)
         self.local_path(app_dir)  # fail early when not mounted
@@ -1673,6 +1676,10 @@ class AppManager:
             earlier = None  # values of an earlier install in the folder
             new_folders: list[str] = []  # removed again when the install fails
             if not is_update:
+                if data is not None:
+                    # as it is now: an install of the same name may have finished
+                    # while this one waited for the lock
+                    data = await self.client.async_fetch()
                 if data and (other := self.installed_as(store_app, data)):
                     raise AppError(f"{store_app.name} is already installed as {other}")
                 if app_key in data.apps if data else installed:
@@ -2012,6 +2019,8 @@ class AppManager:
         name_error, earlier, existing_data = None, None, None
         if other := self.installed_as(store_app, data):
             name_error = f"{store_app.name} is already installed as {other}."
+        elif name and (problem := name_problem(name)):
+            name_error = problem
         elif key in data.apps:
             name_error = f"An app named {key} already exists. Choose another name."
         else:

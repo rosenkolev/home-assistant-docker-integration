@@ -1,5 +1,8 @@
 """Install and package-update a store app into tmp_path with a fake engine."""
 
+# cspell:words Тест
+
+import asyncio
 import json
 import socket
 
@@ -108,6 +111,33 @@ async def test__install_makes_the_data_folders_for_the_app_user(tmp_path, monkey
     assert (tmp_path / "data" / "whoami" / "data").is_dir()
     assert modes[root] == 0o775 and modes[f"{root}/data"] == 0o777
     assert {o for _, o in owned} == {(1000, 1000)}
+
+
+@pytest.mark.parametrize(
+    ("name", "error"),
+    [("!!!", "Latin letters"), ("Тест", "Latin letters"), ("a" * 64, "too long")],
+)
+async def test__a_name_that_cant_be_a_folder_is_refused(manager, name, error):
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data, name=name)
+    assert error in ports["name_error"]
+    with pytest.raises(AppError, match=error):
+        await manager.async_install_store_app(
+            store_app("1.10.0", 3), app_key=name, data=data
+        )
+    assert not manager.client.containers
+
+
+async def test__two_installs_of_one_name_at_once_install_it_once(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    results = await asyncio.gather(
+        manager.async_install_store_app(store_app("1.10.0", 3), data=data),
+        manager.async_install_store_app(store_app("1.10.0", 3), data=data),
+        return_exceptions=True,
+    )
+    assert results[0] == "whoami"
+    assert isinstance(results[1], AppError) and "already installed" in str(results[1])
+    assert len(manager.client.containers) == 1
 
 
 async def test__install_refuses_missing_required_values(manager, tmp_path):

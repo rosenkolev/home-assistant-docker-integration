@@ -560,14 +560,20 @@ def anonymous_mounts(
     """
     host = config.setdefault("HostConfig", {})
     mounts = host.setdefault("Mounts", [])
-    taken = {b.split(":")[1] for b in host.get("Binds") or []}
-    taken |= {m["Target"] for m in mounts}
+
+    def path(target: str) -> str:
+        # an image may declare `VOLUME /data/`: the same place as /data
+        return posixpath.normpath(target)
+
+    taken = {path(b.split(":")[1]) for b in host.get("Binds") or []}
+    taken |= {path(m["Target"]) for m in mounts}
     previous = {
-        m["Destination"]: m["Name"]
+        path(m["Destination"]): m["Name"]
         for m in old_mounts
         if m.get("Type") == "volume" and ANONYMOUS.fullmatch(m.get("Name") or "")
     }
-    for target in {**(config.pop("Volumes", None) or {}), **(image_volumes or {})}:
+    wanted = {**(config.pop("Volumes", None) or {}), **(image_volumes or {})}
+    for target in dict.fromkeys(path(t) for t in wanted):
         if target in taken:
             continue
         if target in previous:
