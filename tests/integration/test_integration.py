@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -64,12 +65,32 @@ async def test__managed_app_should_update(hass, entry):
     assert hass.states.get(update_id).attributes["installed_version"] == "v2.2.0"
 
 
-async def test__only_admins_update_apps_but_anyone_starts_them(
-    hass, entry, monkeypatch
-):
+async def test__rollback_also_to_the_version_shown_as_installed(hass, entry):
+    await call(hass, "manage", app="immich", managed=True)
+    (update_id,) = entity_ids(hass, entry, "update")
+    before = copy.deepcopy(entry.runtime_data.updates.data["immich"])
+    await hass.services.async_call(
+        "update", "install", {"entity_id": update_id}, blocking=True
+    )
+    # as after an update that failed but was kept: the check still shows the
+    # version before it, the backup of which is there to go back to
+    entry.runtime_data.updates.data["immich"] = before
+    assert before.installed_version == "v2.1.0" and before.has_update
+    await hass.services.async_call(
+        "update",
+        "install",
+        {"entity_id": update_id, "version": "v2.1.0"},
+        blocking=True,
+    )
+    await call(hass, "check_updates")
+    assert hass.states.get(update_id).attributes["installed_version"] == "v2.1.0"
+
+
+async def test__only_admins_update_start_or_stop_apps(hass, entry, monkeypatch):
     await call(hass, "manage", app="immich", managed=True)
     (update_id,) = entity_ids(hass, entry, "update")
     (switch_id,) = entity_ids(hass, entry, "switch")
+    button_ids = entity_ids(hass, entry, "button")
     # HA lets every user control every entity
     control = SimpleNamespace(check_entity=lambda entity_id, policy: True)
     users = {
@@ -92,12 +113,22 @@ async def test__only_admins_update_apps_but_anyone_starts_them(
                 "update", service, {"entity_id": update_id}, blocking=True, context=user
             )
     assert hass.states.get(update_id).attributes["installed_version"] == "v2.1.0"
-    await hass.services.async_call(
-        "switch", "turn_off", {"entity_id": switch_id}, blocking=True, context=user
-    )
-    assert hass.states.get(switch_id).state == "off"
+    # every user can control entities: the app refuses non-admins itself
+    for domain, service, entity_id in [
+        ("switch", "turn_off", switch_id),
+        *(("button", "press", b) for b in button_ids),
+    ]:
+        with pytest.raises(HomeAssistantError, match="Unauthorized"):
+            await hass.services.async_call(
+                domain, service, {"entity_id": entity_id}, blocking=True, context=user
+            )
+    assert hass.states.get(switch_id).state == "on"
 
     admin = Context(user_id=owner.id)
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": switch_id}, blocking=True, context=admin
+    )
+    assert hass.states.get(switch_id).state == "off"
     await hass.services.async_call(
         "update", "install", {"entity_id": update_id}, blocking=True, context=admin
     )

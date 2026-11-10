@@ -44,6 +44,8 @@ const since = (iso) => {
 const appStatus = (app) => {
   if (app.busy) return ["busy", app.busy];
   const running = app.containers.filter((c) => c.state === "running");
+  // a container that keeps failing is mostly between two starts
+  if (app.containers.some((c) => c.state === "restarting")) return ["bad", "Restarting"];
   if (!running.length) return ["off", "Stopped"];
   if (running.some((c) => c.health === "unhealthy")) return ["bad", "Unhealthy"];
   if (running.some((c) => c.health === "starting")) return ["warn", "Starting"];
@@ -496,7 +498,7 @@ class DockerAppsPanel extends HTMLElement {
     } else if (!app.busy && this._hasUpdate(app)) {
       // while the app changes, a check can see it half updated: no banner then
       banner = `<div class="banner">${icon("arrow-up-circle-outline")}<div class="grow">
-          <div class="title">Update available: ${esc(update.latest)}</div>
+          <div class="title">Update available: ${esc(update.latest?.startsWith(`${update.installed} (+`) ? "newer images" : update.latest)}</div>
           <div class="muted">${update.store ? "New app package" : `${update.changes.length} service${update.changes.length === 1 ? "" : "s"} change`}</div></div>
         ${readOnly ? "" : `<button class="btn" data-action="skip" ${data} ${busy ? "disabled" : ""} title="Hide this version until a newer one comes">Skip</button>
           <button class="btn primary" data-action="update" ${data} ${busy ? "disabled" : ""}>Update</button>`}</div>`;
@@ -539,7 +541,7 @@ class DockerAppsPanel extends HTMLElement {
             ${appIcon}
             <div class="grow">
               <div class="name">${esc(app.name)}</div>
-              <div class="muted ellipsis">${esc(version)}</div>
+              <div class="muted ellipsis">${esc(version)}${this._state.apps.some((a) => a !== app && a.name === app.name) ? ` · <span class="mono" title="Folder">${esc(app.key)}</span>` : ""}</div>
             </div>
             <span class="chip ${cls}">${esc(label)}</span>
           </div>

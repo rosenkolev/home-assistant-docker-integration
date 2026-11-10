@@ -10,7 +10,7 @@ import os
 import re
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -54,6 +54,7 @@ from ._paths import (
     read_text,
     remove_file,
     remove_tree,
+    set_owner,
     write_text,
 )
 from ._access import check_store_files, host_access
@@ -469,6 +470,10 @@ class AppManager:
         self._listeners: list[Callable[[], None]] = []
         self._locks: dict[str, asyncio.Lock] = {}
         self._volumes_cache: tuple[list[dict], float] | None = None
+        # runs a background task of the config entry (a reload stops it)
+        self.start_task: Callable[[Coroutine, str], None] = (
+            lambda job, name: hass.async_create_background_task(job, name)
+        )
 
     # --- state ---
 
@@ -949,22 +954,32 @@ class AppManager:
         force: bool = False,
         started: list[str] | None = None,
         backup: dict | None = None,
+        only: list[str] | None = None,
     ) -> None:
         """Pull (optional) and bring the project up; self-updates are handed off,
-        with the backup to put back when the new Home Assistant doesn't come up."""
+        with the backup to put back when the new Home Assistant doesn't come up.
+        With `only`, the other services are left as they are (an update)."""
         if pull:
-            await self.engine.async_pull(model, progress=self._progress(app_key, 0, 60))
+            await self.engine.async_pull(
+                model, services=only, progress=self._progress(app_key, 0, 60)
+            )
         ha_service = self.self_service(data, app_key)
+        skip = {ha_service} if ha_service else set()
+        if only is not None:
+            # also when their containers came from docker compose, whose config
+            # hash differs from ours: recreating a database here would stop the
+            # update from being rolled back
+            skip |= set(model.services) - set(only)
         await self.engine.async_up(
             model,
             force_recreate=force,
             progress=self._progress(app_key, 60 if pull else 0, 100),
-            skip={ha_service} if ha_service else None,
+            skip=skip or None,
             started=started,
         )
         if ha_service:
             if await async_start_self_update(self, app_key, model, ha_service, backup):
-                self._watch_self_update()
+                self.start_task(self.async_watch_self_update(), f"{DOMAIN} self-update")
 
     async def async_app_action(
         self, app_key: str, data: DockerData, action: str
@@ -1000,7 +1015,13 @@ class AppManager:
         if not update.targets:
             raise AppError("no update available")
         changes = {t.service: t.latest for t in update.targets if t.kind == "tag"}
-        await self._async_change_tags(app, changes, update.installed_version, data)
+        await self._async_change_tags(
+            app,
+            changes,
+            update.installed_version,
+            data,
+            [t.service for t in update.targets],
+        )
 
     async def async_update_services(
         self, app: AppInfo, services: list[str], tag: str | None, data: DockerData
@@ -1028,7 +1049,7 @@ class AppManager:
             for service in changes
         )
         await self._async_change_tags(
-            app, {s: t for s, t in changes.items() if t}, before, data
+            app, {s: t for s, t in changes.items() if t}, before, data, list(changes)
         )
         return changes
 
@@ -1038,8 +1059,13 @@ class AppManager:
         changes: dict[str, str],
         version: str | None,
         data: DockerData,
+        services: list[str] | None = None,
     ) -> None:
-        """Edit image tags, back up, pull and up; roll back when containers fail."""
+        """Edit image tags, back up, pull and up; roll back when containers fail.
+
+        Only `services` (the ones updated, also by digest) and the ones whose image
+        changes with them (a shared .env version) are pulled and recreated.
+        """
         async with self._operation(app.key, "update"):
             env_path = f"{app.working_dir}/.env"
             originals = {f: await self._read(f) for f in app.config_files}
@@ -1076,6 +1102,18 @@ class AppManager:
 
             # parse before touching anything
             model = await self.async_load_model(app, overrides=changed)
+            only = None
+            if services is not None:
+                now = await self.async_load_model(app)
+                only = sorted(
+                    set(services)
+                    | {
+                        name
+                        for name, spec in model.services.items()
+                        if spec.get("image")
+                        != (now.services.get(name) or {}).get("image")
+                    }
+                )
             entry = await self._async_backup(
                 app, [*app.config_files, env_path], version
             )
@@ -1084,7 +1122,13 @@ class AppManager:
             started: list[str] = []
             try:
                 await self._async_apply(
-                    app.key, model, data, pull=True, started=started, backup=entry
+                    app.key,
+                    model,
+                    data,
+                    pull=True,
+                    started=started,
+                    backup=entry,
+                    only=only,
                 )
                 if not self.self_service(data, app.key):
                     await self._async_wait_healthy(model.project)
@@ -1092,7 +1136,9 @@ class AppManager:
                 # an app that keeps no data can always go back
                 if started and await self._async_keeps_data(model.project, started):
                     raise update_kept(app.name, err) from err
-                raise await self._async_undo_update(app, entry, data, err) from err
+                raise await self._async_undo_update(
+                    app, entry, data, err, only
+                ) from err
             _LOGGER.info("Updated %s: %s", app.key, changes)
 
     async def _async_keeps_data(self, project: str, services: list[str]) -> bool:
@@ -1144,9 +1190,17 @@ class AppManager:
         safe = "".join(
             c if c.isalnum() or c in ".-_" else "_" for c in (version or "unknown")
         )
-        folder = f"{app.working_dir}/{META_DIR}/history/{now:%Y%m%d%H%M%S}-{safe}"
+        base = f"{app.working_dir}/{META_DIR}/history/{now:%Y%m%d%H%M%S}-{safe}"
+        folder = base
 
         def backup() -> list[str]:
+            nonlocal folder
+            # two backups in one second (a rollback right after an update) must
+            # not share a folder: the second would overwrite the first
+            number = 1
+            while os.path.lexists(self.local_path(folder)):
+                number += 1
+                folder = f"{base}-{number}"
             return [
                 path
                 for path in paths
@@ -1157,11 +1211,12 @@ class AppManager:
                 )
             ]
 
+        files = await self.hass.async_add_executor_job(backup)  # chooses the folder
         entry = {
             "version": version,
             "dir": folder,
             "time": now.isoformat(),
-            "files": await self.hass.async_add_executor_job(backup),
+            "files": files,
             "store": store,
         }
         settings = self.settings.setdefault(app.key, AppSettings())
@@ -1173,8 +1228,15 @@ class AppManager:
         await self.async_save()
         return entry
 
-    async def _async_restore(self, app: AppInfo, entry: dict, data: DockerData) -> None:
-        """Put back the files of a backup and bring the app up with them."""
+    async def _async_restore(
+        self,
+        app: AppInfo,
+        entry: dict,
+        data: DockerData,
+        only: list[str] | None = None,
+    ) -> None:
+        """Put back the files of a backup and bring the app up with them; with
+        `only`, just those services change (undoing an update of them)."""
 
         def restore():
             for path in entry["files"]:
@@ -1186,7 +1248,9 @@ class AppManager:
         if entry.get("store"):
             settings.store = entry["store"]
             await self.async_save()
-        await self._async_apply(app.key, await self.async_load_model(app), data, False)
+        await self._async_apply(
+            app.key, await self.async_load_model(app), data, False, only=only
+        )
         # out of the history only now: when the app doesn't come up with it, the
         # user can try again from the update entity
         settings.history = [h for h in settings.history if h is not entry]
@@ -1196,16 +1260,27 @@ class AppManager:
     async def _async_remove_backup(self, entry: dict) -> None:
         """The folder of a backup that is out of the history: its files are in use
         again, and nothing points to it any more."""
+        if any(
+            h.get("dir") == entry["dir"]
+            for settings in self.settings.values()
+            for h in settings.history
+        ):
+            return  # still a backup in the history (from before folders were unique)
         if local := self.paths.to_local(entry["dir"]):
             await self.hass.async_add_executor_job(remove_tree, local)
 
     async def _async_undo_update(
-        self, app: AppInfo, entry: dict, data: DockerData, err: Exception
+        self,
+        app: AppInfo,
+        entry: dict,
+        data: DockerData,
+        err: Exception,
+        only: list[str] | None = None,
     ) -> AppError:
         """Put back the backup of a failed update; the error to raise tells how
         that went, with the reason the update failed."""
         try:
-            await self._async_restore(app, entry, data)
+            await self._async_restore(app, entry, data, only)
         except (AppError, ComposeError, DockerError, OSError) as undo:
             version = entry.get("version") or "the earlier version"
             _LOGGER.error("%s: putting back %s failed: %s", app.key, version, undo)
@@ -1412,9 +1487,11 @@ class AppManager:
             else:
                 spec.pop("volumes", None)
             if external:
+                # by its own name: a volume of another app is used as it is, a new
+                # one is created (external would refuse it)
                 volumes = override.get("volumes") or {}
                 for name in external:
-                    volumes[name] = {"external": True}
+                    volumes[name] = {"name": name}
                 override["volumes"] = volumes
 
         await self._async_edit_override(app, service, change, data)
@@ -1616,12 +1693,27 @@ class AppManager:
                 **(earlier or {}),
                 **(values or {}),
             }
+            if not is_update and (
+                missing := [
+                    v.label or v.key
+                    for v in store_app.variables
+                    if v.required
+                    and v.type not in ("random", "boolean")
+                    and not str(values.get(v.key) or v.default or "").strip()
+                ]
+            ):
+                # the install dialog asks for them; an action may leave them out
+                raise AppError(
+                    f"{store_app.name} needs a value for: {', '.join(missing)}"
+                )
             # apps installed before fixed container names were renamed keep them
             rename = installed.get("renamed_containers", False) if installed else True
+            # and CasaOS apps installed before keep their data folder
+            own = installed.get("own_data_folder", False) if installed else True
 
             def prepare() -> tuple[str, dict[str, str], list[str], set[int]]:
                 # rendering and parsing YAML take a while: not in the loop
-                compose, env = self._render(store_app, app_key, values, rename)
+                compose, env = self._render(store_app, app_key, values, rename, own)
                 try:
                     check_env(env)  # before anything is written
                 except ValueError as err:
@@ -1677,6 +1769,7 @@ class AppManager:
                         override_path, f"{OVERRIDE_HEADER}services: {{}}\n"
                     )
                 model = await self.async_load_model(app)
+                await self._async_make_data_folders(model, app_key)
                 await self._async_apply(
                     app_key, model, data, pull=True, started=started, backup=backup
                 )
@@ -1718,6 +1811,7 @@ class AppManager:
                 "web_target": store_app.web_target,
                 "web_scheme": store_app.web_scheme,
                 "renamed_containers": rename,
+                "own_data_folder": own,
                 "access": access,  # allowed by the user
             }
             await self.async_save()
@@ -1763,12 +1857,50 @@ class AppManager:
 
         await self.hass.async_add_executor_job(write)
 
+    async def _async_make_data_folders(self, model: ComposeModel, app_key: str) -> None:
+        """The folders a store app mounts from its data folder, made before it
+        starts. Docker would make the missing ones root's, and an app that runs as
+        another user (PUID 1000, node-red) then can't write its data.
+        They belong to the owner and are open to the user the app runs as (0777,
+        as Runtipi does); folders that are there stay as they are."""
+        data_dir = posixpath.normpath(self.store_paths(app_key)[1])
+        sources = {data_dir}
+        for service in model.services.values():
+            for volume in service.get("volumes") or []:
+                entry = mount_entry(volume, model)
+                # a path in the data folder (a named volume never is)
+                if entry and entry["source"]:
+                    source = posixpath.normpath(entry["source"])
+                    if source.startswith(f"{data_dir}/"):
+                        sources.add(source)
+        local_root = self.local_path(data_dir)
+        folders = {self.local_path(s): s == data_dir for s in sources}
+        owner = self.owner
+
+        def make() -> None:
+            root = os.path.realpath(local_root)
+            for folder, is_root in sorted(folders.items()):
+                missing = []
+                while not os.path.lexists(folder):
+                    missing.append(folder)
+                    folder = os.path.dirname(folder)
+                real = os.path.realpath(folder)
+                if not is_root and real != root and not real.startswith(root + os.sep):
+                    continue  # a link out of the data folder
+                for path in reversed(missing):
+                    os.makedirs(path, exist_ok=True)
+                    set_owner(path, owner)
+                    os.chmod(path, 0o775 if is_root or path == local_root else 0o777)
+
+        await self.hass.async_add_executor_job(make)
+
     def _render(
         self,
         store_app: StoreApp,
         app_key: str,
         values: dict[str, str],
         rename_containers: bool = True,
+        own_data_folder: bool = True,
     ) -> tuple[str, dict[str, str]]:
         return render_app(
             store_app,
@@ -1782,6 +1914,7 @@ class AppManager:
                 "PGID": str(self.owner[1] if self.owner else 1000),
             },
             rename_containers,
+            own_data_folder,
         )
 
     def _access(self, compose: str, env: dict[str, str], app_key: str) -> list[str]:
@@ -1826,6 +1959,7 @@ class AppManager:
                 app_key,
                 dict(store.get("values") or {}),
                 store.get("renamed_containers", False),
+                store.get("own_data_folder", False),
             )
             allowed = self._allowed_access(app_key, store)
             return [a for a in self._access(compose, env, app_key) if a not in allowed]

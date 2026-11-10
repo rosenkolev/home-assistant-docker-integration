@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
@@ -16,6 +17,7 @@ from .apps import AppError, AppUpdate, UpdateKeptError, notify_update_kept
 from .const import DOMAIN
 from .coordinator import DockerAppsConfigEntry
 from .entity import AppEntity, app_unique_id
+from .services import refresh_disk
 
 # apps update side by side; the app lock keeps one operation per app
 PARALLEL_UPDATES = 0
@@ -150,10 +152,15 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
         history = manager.history_versions(self.app_key)
         if self.app is None:
             raise HomeAssistantError(f"app {self.app_key} is not running on Docker")
+        # a version with a backup is put back from it, also the latest one: the
+        # backup has the user's edits (rolling forward after a rollback). Also the
+        # version shown as installed: after an update that failed but was kept,
+        # that is the version before it until the next check
+        put_back = version in history and (
+            version != self.installed_version or version != self.latest_version
+        )
         try:
-            # a version with a backup is put back from it, also the latest one: the
-            # backup has the user's edits (rolling forward after a rollback)
-            if version and version != self.installed_version and version in history:
+            if version and put_back:
                 await manager.async_rollback(
                     self.app, version, self.docker_data, self.installed_version
                 )
@@ -170,5 +177,10 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
             if isinstance(err, UpdateKeptError):
                 notify_update_kept(self.hass, self.app_key, err)
             raise HomeAssistantError(str(err)) from err
-        await self.runtime.docker.async_refresh()
-        await self.coordinator.async_check_now()
+        finally:
+            # also after a failure: the files may have changed (an update kept)
+            await self.runtime.docker.async_refresh()
+            await self.coordinator.async_check_now()
+        # a note about an earlier update that failed is out of date now
+        persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.app_key}")
+        refresh_disk(self.runtime)

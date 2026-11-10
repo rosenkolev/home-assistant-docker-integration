@@ -367,8 +367,16 @@ async def test__failed_health_after_start_rolls_back_only_apps_without_data(
     monkeypatch.setattr(manager, "_async_wait_healthy", unhealthy)
     if keeps_data:
         # the new version may have migrated its data: it stays
-        with open(f"{project}/compose.yaml", "a", encoding="utf-8") as file:
-            file.write("    volumes:\n      - ./db:/var/lib/postgresql/data\n")
+        path = f"{project}/compose.yaml"
+        with open(path, encoding="utf-8") as file:
+            text = file.read()
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(
+                text.replace(
+                    '      - "2283:2283"\n',
+                    '      - "2283:2283"\n    volumes:\n      - ./upload:/data\n',
+                )
+            )
         with pytest.raises(UpdateKeptError, match="was not rolled back"):
             await manager.async_update(data.apps["immich"], update, data)
         assert (
@@ -382,6 +390,41 @@ async def test__failed_health_after_start_rolls_back_only_apps_without_data(
         assert (
             "IMMICH_VERSION=v2.1.0" in open(f"{project}/.env", encoding="utf-8").read()
         )
+
+
+async def test__update_leaves_the_other_services_alone(setup, project):
+    manager, docker, data = setup
+    await manager.async_configure("immich", managed=True)
+    database = next(
+        c for c in docker.containers.values() if "database" in c["Names"][0]
+    )
+    # containers made by docker compose have another config hash
+    database["Labels"]["com.docker.compose.config-hash"] = "from-docker-compose"
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    docker.calls.clear()
+    await manager.async_update(data.apps["immich"], update, data)
+    assert database["Id"] in docker.containers  # not recreated
+    assert ("pull", "postgres:16.4") not in docker.calls
+
+
+async def test__undoing_an_update_leaves_the_other_services_alone(
+    setup, project, monkeypatch
+):
+    manager, docker, data = setup
+    await manager.async_configure("immich", managed=True)
+    database = next(
+        c for c in docker.containers.values() if "database" in c["Names"][0]
+    )
+    database["Labels"]["com.docker.compose.config-hash"] = "from-docker-compose"
+    update = (await manager.async_check_updates(data, {}))["immich"]
+
+    async def unhealthy(_project):
+        raise AppError("immich-server is unhealthy")
+
+    monkeypatch.setattr(manager, "_async_wait_healthy", unhealthy)
+    with pytest.raises(AppError, match="rolled back"):
+        await manager.async_update(data.apps["immich"], update, data)
+    assert database["Id"] in docker.containers  # not recreated either way
 
 
 async def test__update_single_untracked_service(setup, project):

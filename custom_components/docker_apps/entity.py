@@ -6,7 +6,7 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -184,7 +184,14 @@ class AppEntity(CoordinatorEntity):
         return self.runtime.docker.last_update_success and self.app is not None
 
     async def _async_app_action(self, action: str) -> None:
-        """Start, stop or restart all containers of the app."""
+        """Start, stop or restart all containers of the app. Admins only, like the
+        panel and the actions: HA lets every user control every entity. Calls with
+        no user (an automation or script) are allowed, as only admins make them."""
+        context = self._context
+        if context is not None and context.user_id is not None:
+            user = await self.hass.auth.async_get_user(context.user_id)
+            if user is None or not user.is_admin:
+                raise Unauthorized(context=context)
         try:
             await self.runtime.manager.async_app_action(
                 self.app_key, self.docker_data, action

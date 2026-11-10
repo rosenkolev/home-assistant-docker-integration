@@ -5,6 +5,7 @@
 #   scripts/sandbox.sh up      create (or start) the sandbox, onboard and set up Docker Apps
 #   scripts/sandbox.sh deploy  copy the integration into the sandbox and restart Home Assistant
 #   scripts/sandbox.sh token   print an access token of the test account
+#   scripts/sandbox.sh login   print a line that logs a browser on the tunnel in
 #   scripts/sandbox.sh tunnel [port...]  forward http://localhost:18123 and the app ports
 #                              to the sandbox (runs until stopped; restart it for new apps)
 #   scripts/sandbox.sh call SERVICE [JSON]  call a docker_apps service, print the answer
@@ -74,12 +75,14 @@ wait_ready() {
     { echo "Home Assistant did not start" >&2; exit 1; }
 }
 
-token() {
+tokens() {
   local flow code
   flow=$(api POST /auth/login_flow "{\"client_id\":\"$CLIENT\",\"handler\":[\"homeassistant\",null],\"redirect_uri\":\"$CLIENT\"}" | field flow_id)
   code=$(api POST "/auth/login_flow/$flow" "{\"client_id\":\"$CLIENT\",\"username\":\"$SANDBOX_USER\",\"password\":\"$SANDBOX_PASSWORD\"}" | field result)
-  api POST /auth/token "grant_type=authorization_code&code=$code&client_id=$CLIENT" | field access_token
+  api POST /auth/token "grant_type=authorization_code&code=$code&client_id=$CLIENT"
 }
+
+token() { tokens | field access_token; }
 
 up() {
   copy_integration
@@ -158,6 +161,12 @@ deploy)
   echo deployed
   ;;
 token) token ;;
+login)
+  # a browser session for the tunnel, without typing the password: run the
+  # printed line in the browser console on the login page, then reload
+  printf 'localStorage.setItem("hassTokens", JSON.stringify(Object.assign(%s, {hassUrl: "%s", clientId: "%s/", expires: Date.now() + 1800000})))\n' \
+    "$(tokens)" "${CLIENT%/}" "${CLIENT%/}"
+  ;;
 call)
   data=${3:-'{}'}
   printf %s "$data" | "${SSH[@]}" "curl -s -X POST http://127.0.0.1:$PORT/api/services/docker_apps/$2 \

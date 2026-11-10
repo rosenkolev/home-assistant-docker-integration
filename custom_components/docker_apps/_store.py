@@ -296,16 +296,28 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
     )
 
 
-def render_casaos(app: StoreApp, project: str, data_dir: str, data_root: str) -> dict:
+def render_casaos(
+    app: StoreApp, project: str, data_dir: str, data_root: str, own_folder: bool = True
+) -> dict:
+    """`own_folder`: the folder the app names (/DATA/AppData/memos) is its data
+    folder. Most apps name it, so installed under another name that would be the
+    folder of another app. Off for updates of apps installed before, which keep
+    their data where it is."""
     data = safe_load(app.compose or "") or {}
     data.pop("x-casaos", None)
+    original = str(data.get("name") or "") if own_folder else ""
     data["name"] = project
     for service in (data.get("services") or {}).values():
         if isinstance(service, dict):
             service.pop("x-casaos", None)
     text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
-    for pattern in ("/DATA/AppData/$AppID", "/DATA/AppData/${AppID}"):
-        text = text.replace(pattern, data_dir)
+    for name in ("$AppID", "${AppID}", *([original] if original else [])):
+        # the whole folder name: /DATA/AppData/memos2 is not memos
+        text = re.sub(
+            re.escape(f"/DATA/AppData/{name}") + r"(?![\w.-])",
+            lambda _: data_dir,
+            text,
+        )
     text = text.replace("/DATA/AppData/", f"{data_root}/").replace(
         "/DATA/", f"{data_root}/"
     )
@@ -575,15 +587,18 @@ def render_app(
     values: dict[str, str],
     defaults: dict[str, str],
     rename_containers: bool = True,
+    own_data_folder: bool = True,
 ) -> tuple[str, dict[str, str]]:
     """Return (compose text, env values) for an install or package update.
 
     `rename_containers` is off for package updates of apps installed before fixed
-    container names were renamed, so their containers keep their names.
+    container names were renamed, so their containers keep their names;
+    `own_data_folder` likewise for CasaOS apps installed before their named data
+    folder was their own (see render_casaos).
     """
     env = dict(defaults)
     if app.kind == KIND_CASAOS:
-        data = render_casaos(app, project, data_dir, data_root)
+        data = render_casaos(app, project, data_dir, data_root, own_data_folder)
         env["AppID"] = project
         if port := values.get("APP_PORT"):
             publish_web_port(data, app, str(port))

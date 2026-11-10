@@ -7,7 +7,7 @@ import pytest
 
 from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._docker_client import DockerError
-from custom_components.docker_apps._paths import remove_tree
+from custom_components.docker_apps._paths import PathMap, remove_tree
 from custom_components.docker_apps._store import parse_runtipi
 from custom_components.docker_apps.apps import (
     AppError,
@@ -80,6 +80,49 @@ async def test__install_writes_files_and_starts_containers(manager, tmp_path):
     assert container["Labels"]["com.docker.compose.project"] == "whoami"
     settings = manager.get("whoami")
     assert settings.managed and settings.store["package_version"] == "3"
+
+
+async def test__install_makes_the_data_folders_for_the_app_user(tmp_path, monkeypatch):
+    # host paths as on Linux (a Windows drive colon would split the volume)
+    monkeypatch.setattr(apps_module, "Store", MemoryStore)
+    manager = AppManager(
+        fake_hass(), "entry", FakeDocker(), FakeRegistry(), "/srv/apps", "/srv/data"
+    )
+    await manager.async_setup()
+    manager.paths = PathMap([("/srv", tmp_path.as_posix())])
+    owned, modes = [], {}
+    monkeypatch.setattr(apps_module, "set_owner", lambda p, o: owned.append((p, o)))
+    real_chmod = apps_module.os.chmod
+    monkeypatch.setattr(
+        apps_module.os,
+        "chmod",
+        lambda p, m: modes.__setitem__(str(p).replace("\\", "/"), m)
+        or real_chmod(p, m),
+    )
+    manager.owner = (1000, 1000)
+    await manager.async_install_store_app(
+        store_app("1.10.0", 3), data=await manager.client.async_fetch()
+    )
+    root = (tmp_path / "data" / "whoami").as_posix()
+    # Docker would make them root's: an app running as 1000 couldn't write
+    assert (tmp_path / "data" / "whoami" / "data").is_dir()
+    assert modes[root] == 0o775 and modes[f"{root}/data"] == 0o777
+    assert {o for _, o in owned} == {(1000, 1000)}
+
+
+async def test__install_refuses_missing_required_values(manager, tmp_path):
+    fields = [
+        *CONFIG["form_fields"],
+        {"type": "text", "label": "Admin", "env_variable": "ADMIN", "required": True},
+    ]
+    app = parse_runtipi(
+        json.dumps({**CONFIG, "form_fields": fields}), COMPOSE, None, "tipi"
+    )
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match="needs a value for: Admin"):
+        await manager.async_install_store_app(app, data=data, values={"ADMIN": " "})
+    assert not (tmp_path / "apps" / "whoami").exists()
+    await manager.async_install_store_app(app, data=data, values={"ADMIN": "me"})
 
 
 async def test__install_copies_the_data_folder_but_keeps_user_files(manager, tmp_path):
@@ -360,7 +403,7 @@ async def test__prune_volumes_keeps_volumes_of_installed_apps(manager, tmp_path)
 async def test__uninstall_with_data_removes_folders(manager, tmp_path):
     data = await manager.client.async_fetch()
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
-    (tmp_path / "data" / "whoami").mkdir(parents=True)
+    assert (tmp_path / "data" / "whoami").is_dir()  # made before the app starts
     data = await manager.client.async_fetch()
 
     await manager.async_uninstall(data.apps["whoami"], data, remove_data=True)
@@ -398,7 +441,6 @@ async def test__install_refuses_a_data_folder_with_files_of_someone_else(
 async def test__reinstall_uses_its_data_folder_again(manager, tmp_path):
     data = await manager.client.async_fetch()
     await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
-    (tmp_path / "data" / "whoami").mkdir(parents=True)
     (tmp_path / "data" / "whoami" / "app.db").write_text("kept")
     manager.client.containers.clear()  # removed keeping its files
     data = await manager.client.async_fetch()
@@ -604,9 +646,22 @@ async def test__set_volumes_uses_docker_volumes_and_refuses_system_paths(
     override = (tmp_path / "apps" / "whoami" / "compose.override.yaml").read_text(
         encoding="utf-8"
     )
-    assert "immich_model-cache:" in override and "external: true" in override
+    assert "name: immich_model-cache" in override
     binds = next(iter(manager.client.containers.values()))["HostConfig"]["Binds"]
     assert "immich_model-cache:/cache:rw" in binds
+
+    # a new volume is created, under the name given
+    data = await manager.client.async_fetch()
+    mounts = (await manager.async_volumes(data.apps["whoami"]))["services"]["whoami"]
+    await manager.async_set_volumes(
+        data.apps["whoami"],
+        "whoami",
+        [*mounts, {"source": "whoami_cache", "target": "/new"}],
+        data,
+    )
+    assert "whoami_cache" in manager.client.volumes
+    binds = next(iter(manager.client.containers.values()))["HostConfig"]["Binds"]
+    assert "whoami_cache:/new:rw" in binds
 
 
 async def test__volume_suggestions_are_grouped_and_cached(manager):

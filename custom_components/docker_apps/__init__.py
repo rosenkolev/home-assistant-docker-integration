@@ -64,7 +64,7 @@ from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.BUTTON, Platform.SENSOR, Platform.SWITCH, Platform.UPDATE]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PANEL_VERSION = "56"
+PANEL_VERSION = "57"
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -122,10 +122,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
     )
     await manager.async_setup()
     # how an update of this container went
+    manager.start_task = lambda job, name: entry.async_create_background_task(
+        hass, job, name
+    )
     if await manager.async_check_self_update_at_start():
-        entry.async_create_background_task(
-            hass, manager.async_watch_self_update(), f"{DOMAIN} self-update"
-        )
+        manager.start_task(manager.async_watch_self_update(), f"{DOMAIN} self-update")
     catalog = Catalog(hass, entry.entry_id, session)
     await catalog.async_load(_repositories(entry))
 

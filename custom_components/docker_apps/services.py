@@ -19,6 +19,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.service import async_register_admin_service
 
+from ._compose import ComposeError
 from ._docker_client import DockerError
 from ._models import AppInfo, ContainerInfo
 from .apps import AppError, UpdateKeptError, notify_update_kept
@@ -75,10 +76,19 @@ def get_container(runtime: DockerAppsRuntime, key: str) -> ContainerInfo:
     raise ServiceValidationError(f"container '{key}' not found")
 
 
+def refresh_disk(runtime: DockerAppsRuntime) -> None:
+    """Disk usage (checked hourly) after images or apps came or went; in the
+    background, as Docker takes a while to count it."""
+    disk = runtime.disk
+    disk.config_entry.async_create_background_task(
+        disk.hass, disk.async_refresh(), f"{DOMAIN} disk usage"
+    )
+
+
 async def _call(coro):
     try:
         return await coro
-    except (AppError, DockerError, CatalogError) as err:
+    except (AppError, ComposeError, DockerError, CatalogError) as err:
         raise HomeAssistantError(str(err)) from err
 
 
@@ -280,6 +290,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         persistent_notification.async_dismiss(hass, notification_id)
         await runtime.docker.async_refresh()
         await runtime.updates.async_check_now()
+        refresh_disk(runtime)
         return {"app": key}
 
     async def uninstall(call: ServiceCall) -> None:
@@ -292,6 +303,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         )
         await runtime.docker.async_refresh()
         async_remove_stale_devices(hass, entry)
+        refresh_disk(runtime)
 
     # admin only too: logs can hold secrets
     async_register_admin_service(

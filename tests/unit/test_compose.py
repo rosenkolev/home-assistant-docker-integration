@@ -205,6 +205,14 @@ def test__load_model_should_reject_bad_extends(compose, error):
         )
 
 
+def test__load_model_names_the_file_with_broken_yaml():
+    with pytest.raises(ComposeError, match="compose.yaml is not valid YAML") as err:
+        load_model(
+            "a", "/srv/a", {"/srv/a/compose.yaml": "services:\n  a:\n   b: [x\n"}, None
+        )
+    assert "unicode string" not in str(err.value)
+
+
 def test__start_order_should_put_dependencies_first():
     order = start_order(model())
     assert order.index("redis") < order.index("immich-server")

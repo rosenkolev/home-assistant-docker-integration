@@ -302,7 +302,12 @@ def load_model(
     env = parse_env_file(env_text) if env_text else {}
     data: dict = {}
     for name, text in files.items():
-        loaded = load_yaml(text) or {}
+        try:
+            loaded = load_yaml(text) or {}
+        except yaml.YAMLError as err:
+            # PyYAML calls the text "<unicode string>": name the file instead
+            detail = str(err).replace('"<unicode string>"', posixpath.basename(name))
+            raise ComposeError(f"{name} is not valid YAML: {detail}") from err
         if not isinstance(loaded, dict):
             raise ComposeError(f"{name} is not a compose file")
         if "include" in loaded:
@@ -1117,15 +1122,22 @@ class ComposeEngine:
         ]
 
     async def async_pull(
-        self, model: ComposeModel, progress: Progress | None = None
+        self,
+        model: ComposeModel,
+        progress: Progress | None = None,
+        services: list[str] | None = None,
     ) -> None:
+        """Pull the images of the project, or of the given services."""
         images = list(
             dict.fromkeys(
                 service["image"]
-                for service in model.services.values()
+                for name, service in model.services.items()
                 if service.get("pull_policy") not in ("never", "build")
+                and (services is None or name in services)
             )
         )
+        if not images:
+            return
         done = 0
 
         async def pull(image: str) -> None:
@@ -1289,6 +1301,14 @@ class ComposeEngine:
                 if dep in running:
                     await self._wait_for(running[dep], condition, dep)
             if skip and name in skip:
+                # not recreated, but up like the rest of the app (an update of a
+                # stopped app starts it); also there for `network_mode: service:x`
+                if current := by_service.get(name):
+                    if current[0].get("State") != "running":
+                        await self.client.async_container_action(
+                            current[0]["Id"], "start"
+                        )
+                    running[name] = current[0]["Id"]
                 continue
             running[name] = await self._apply_service(
                 model,

@@ -65,7 +65,8 @@ class DockerError(Exception):
     """Docker engine returned an error."""
 
     def __init__(self, status: int, message: str):
-        super().__init__(f"{status}: {message}")
+        # Docker's message says what is wrong; the status is for code to check
+        super().__init__(message or f"Docker error {status}")
         self.status = status
         self.message = message
 

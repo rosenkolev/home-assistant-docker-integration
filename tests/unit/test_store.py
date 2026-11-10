@@ -355,6 +355,33 @@ def test__archive_url_and_env_format():
     assert format_env({"A": "1", "B": "x y"}).splitlines()[1:] == ["A=1", "B='x y'"]
 
 
+def test__render_casaos_uses_its_own_folder_under_another_name():
+    text = CASAOS.replace(
+        "/DATA/AppData/$AppID/config", "/DATA/AppData/jellyfin/config"
+    )
+    text = text.replace(
+        "      - type: bind\n        source: /DATA/Media",
+        "      - /DATA/AppData/jellyfin2/x:/x\n      - type: bind\n        source: /DATA/Media",
+    )
+    app = parse_casaos_compose(text, "repo")
+
+    def sources(**kwargs):
+        compose, _ = render_app(app, "films", "/d/films", "/d", {}, {}, **kwargs)
+        volumes = yaml.safe_load(compose)["services"]["jellyfin"]["volumes"]
+        return [
+            v["source"] if isinstance(v, dict) else v.split(":")[0] for v in volumes
+        ]
+
+    # the folder the app names is its own; another app's folder stays that app's
+    assert sources() == ["/d/films/config", "/d/jellyfin2/x", "/d/Media"]
+    # an app installed before keeps its data where it is
+    assert sources(own_data_folder=False) == [
+        "/d/jellyfin/config",
+        "/d/jellyfin2/x",
+        "/d/Media",
+    ]
+
+
 def test__render_casaos_moves_the_web_port():
     app = parse_casaos_compose(CASAOS, "repo")
     compose, _ = render_app(app, "jellyfin", "/d/j", "/d", {"APP_PORT": "18090"}, {})
