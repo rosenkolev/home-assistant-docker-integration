@@ -208,6 +208,10 @@
         "allow_db_minor": {
           "name": "Allow database minor updates",
           "description": "Update database images within the same major version when a new app version needs it."
+        },
+        "allow_host_access": {
+          "name": "Allow new host access",
+          "description": "Allow the access to the host (Docker, host folders, devices, privileged mode) that the pending app store update asks for, so it can be installed."
         }
       }
     },
@@ -366,6 +370,10 @@
         "use_existing_data": {
           "name": "Use existing data",
           "description": "Use a data folder that already has files, for data moved from another server or CasaOS. Without it, such a folder is refused."
+        },
+        "allow_host_access": {
+          "name": "Allow host access",
+          "description": "Install an app that asks for access to the host: Docker, host folders, devices, host network or privileged mode. Without it, such an app is refused with the list of what it asks for."
         }
       }
     },

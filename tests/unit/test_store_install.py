@@ -9,7 +9,12 @@ from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._docker_client import DockerError
 from custom_components.docker_apps._paths import remove_tree
 from custom_components.docker_apps._store import parse_runtipi
-from custom_components.docker_apps.apps import AppError, AppManager, host_ports_in_use
+from custom_components.docker_apps.apps import (
+    AppError,
+    AppManager,
+    HostAccessError,
+    host_ports_in_use,
+)
 from tests.fake_docker import FakeDocker, FakeRegistry
 from tests.unit.test_apps import MemoryStore, fake_hass
 
@@ -636,3 +641,84 @@ async def test__volume_suggestions_are_grouped_and_cached(manager):
     assert calls == 1  # cached
     assert first["volumes"] == [{"source": "immich_model-cache", "app": "immich"}]
     assert first["apps"] == {"jellyfin": [{"source": "/srv/media", "target": "/media"}]}
+
+
+def app_with(extra: str, version: str = "1.10.0", tipi: int = 3):
+    """The whoami store app with more in its service."""
+    config = {**CONFIG, "version": version, "tipi_version": tipi}
+    compose = COMPOSE.replace("v1.10.0", f"v{version}") + extra
+    return parse_runtipi(json.dumps(config), compose, None, "tipi")
+
+
+DOCKER_SOCK = "      - /var/run/docker.sock:/var/run/docker.sock\n"
+
+
+async def test__install_asks_before_giving_access_to_the_host(manager):
+    app = app_with(DOCKER_SOCK + "    privileged: true\n")
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(app, data)
+    assert ports["access"] == [
+        "Full control of Docker (/var/run/docker.sock)",
+        "Privileged mode (all devices, can leave the container)",
+    ]
+    with pytest.raises(HostAccessError, match="asks for access to the host"):
+        await manager.async_install_store_app(app, data=data)
+    assert not manager.client.containers
+
+    await manager.async_install_store_app(app, data=data, allow_host_access=True)
+    assert manager.get("whoami").store["access"] == ports["access"]
+
+
+async def test__update_with_new_access_is_held_until_allowed(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert manager.get("whoami").store["access"] == []
+    data = await manager.client.async_fetch()
+    new = app_with(DOCKER_SOCK, "1.11.0", 4)
+
+    update = (await manager.async_check_updates(data, {new.id: new}))["whoami"]
+    assert update.new_access == ["Full control of Docker (/var/run/docker.sock)"]
+    assert "needs new access" in update.blocked
+    with pytest.raises(HostAccessError, match="needs new access"):
+        await manager.async_update(data.apps["whoami"], update, data)
+
+    await manager.async_allow_access("whoami", new)
+    update = (await manager.async_check_updates(data, {new.id: new}))["whoami"]
+    assert not update.blocked and update.has_update
+    await manager.async_update(data.apps["whoami"], update, data)
+    assert manager.get("whoami").store["version"] == "1.11.0"
+
+
+async def test__update_with_the_same_access_goes_ahead(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(
+        app_with(DOCKER_SOCK), data=data, allow_host_access=True
+    )
+    data = await manager.client.async_fetch()
+    new = app_with(DOCKER_SOCK, "1.11.0", 4)
+    update = (await manager.async_check_updates(data, {new.id: new}))["whoami"]
+    assert not update.blocked and not update.new_access
+
+
+async def test__installed_before_access_was_asked_counts_its_files(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(
+        app_with(DOCKER_SOCK), data=data, allow_host_access=True
+    )
+    del manager.get("whoami").store["access"]  # as stored by an older version
+    data = await manager.client.async_fetch()
+    new = app_with(DOCKER_SOCK + "    network_mode: host\n", "1.11.0", 4)
+    update = (await manager.async_check_updates(data, {new.id: new}))["whoami"]
+    assert update.new_access == ["Host network"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["    env_file: ../immich/.env\n", "    extends: {file: /etc/compose.yaml}\n"],
+)
+async def test__store_app_never_reads_files_outside_its_folder(manager, extra):
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match="outside the app folder"):
+        await manager.async_install_store_app(
+            app_with(extra), data=data, allow_host_access=True
+        )

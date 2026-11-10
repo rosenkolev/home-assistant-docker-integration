@@ -47,6 +47,9 @@ manage:
     allow_db_minor:
       selector:
         boolean:
+    allow_host_access:
+      selector:
+        boolean:
 update_services:
   fields:
     app:
@@ -164,6 +167,9 @@ install:
       selector:
         object:
     use_existing_data:
+      selector:
+        boolean:
+    allow_host_access:
       selector:
         boolean:
 uninstall:

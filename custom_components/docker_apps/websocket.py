@@ -109,6 +109,7 @@ def ws_state(
                         "available": update.has_update,
                         "error": update.error,
                         "blocked": update.blocked,
+                        "new_access": update.new_access,
                         "store": bool(update.store_app),
                         "release_notes": (
                             update.store_app.release_notes if update.store_app else None

@@ -55,6 +55,7 @@ from ._paths import (
     remove_tree,
     write_text,
 )
+from ._access import check_store_files, host_access
 from ._registry import RegistryClient, RegistryError
 from ._selfupdate import RESULT_FILE, UP_TIMEOUT, async_start_self_update
 from ._store import (
@@ -125,6 +126,16 @@ class UpdateKeptError(AppError):
     """An update whose new version started and then failed. It is not rolled back:
     the new version may have changed its data (a database migration) in a way the
     old one can't read. The backup stays, so the user can roll back."""
+
+
+class HostAccessError(AppError):
+    """A store app asks for access to the host the user hasn't allowed."""
+
+    def __init__(self, name: str, access: list[str], update: bool = False):
+        self.access = access
+        what = "needs new access" if update else "asks for access"
+        then = "Allow it in Docker Apps to update" if update else "Allow it to install"
+        super().__init__(f"{name} {what} to the host: {'; '.join(access)}. {then}.")
 
 
 def notify_update_kept(hass: HomeAssistant, app_key: str, err: Exception) -> None:
@@ -210,6 +221,8 @@ class AppUpdate:
     store_app: StoreApp | None = None
     error: str | None = None
     blocked: str | None = None  # why the update can't be installed automatically
+    # host access the new package asks for that the user hasn't allowed yet
+    new_access: list[str] = field(default_factory=list)
 
     @property
     def targets(self) -> list[ServiceUpdate]:
@@ -721,7 +734,18 @@ class AppManager:
                 latest = store_app.version or store_app.package_version
                 if latest == installed:
                     latest = f"{installed} (package {store_app.package_version})"
-            return AppUpdate(app_key, installed, latest, store_app=store_app)
+            update = AppUpdate(app_key, installed, latest, store_app=store_app)
+            if store_app and latest != installed:
+                try:
+                    update.new_access = await self.async_new_access(app_key, store_app)
+                except AppError as err:
+                    update.blocked = str(err)
+                if update.new_access:
+                    update.blocked = (
+                        f"{latest} needs new access to the host: "
+                        f"{'; '.join(update.new_access)}. Allow it to update."
+                    )
+            return update
 
         services = []
         errors = []
@@ -933,6 +957,7 @@ class AppManager:
     ) -> None:
         """Install the pending update of a managed app as one package."""
         if update.store_app is not None:
+            # access is checked by the install, against what the user allowed
             await self.async_install_store_app(
                 update.store_app, app_key=app.key, is_update=True, data=data
             )
@@ -1494,11 +1519,14 @@ class AppManager:
         is_update: bool = False,
         data: DockerData | None = None,
         use_existing_data: bool = False,
+        allow_host_access: bool = False,
     ) -> str:
         """Install a store app, or install the new package of an installed one.
 
         `use_existing_data` takes a data folder that already has files (data moved
-        from another server or CasaOS) instead of refusing it.
+        from another server or CasaOS) instead of refusing it. Access to the host
+        (Docker, host folders, privileged...) needs `allow_host_access`; for an
+        update, only access the user hasn't allowed before.
         """
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
@@ -1547,6 +1575,14 @@ class AppManager:
             # apps installed before fixed container names were renamed keep them
             rename = installed.get("renamed_containers", False) if installed else True
             compose, env = self._render(store_app, app_key, values, rename)
+            access = self._access(compose, env, app_key)
+            if is_update:
+                allowed = await self._async_allowed_access(app_key)
+                new_access = [a for a in access if a not in allowed]
+            else:
+                new_access = access
+            if new_access and not allow_host_access:
+                raise HostAccessError(store_app.name, new_access, update=is_update)
             if data is not None and not is_update:
                 wanted = published_ports(interpolate(compose, env))
                 if conflicts := await self._async_ports_in_use(
@@ -1624,6 +1660,7 @@ class AppManager:
                 "web_target": store_app.web_target,
                 "web_scheme": store_app.web_scheme,
                 "renamed_containers": rename,
+                "access": access,  # allowed by the user
             }
             await self.async_save()
         if failure:
@@ -1680,6 +1717,55 @@ class AppManager:
             rename_containers,
         )
 
+    def _access(self, compose: str, env: dict[str, str], app_key: str) -> list[str]:
+        """The host access of a rendered store app; AppError for files it would
+        read outside its folder."""
+        app_dir = self.store_paths(app_key)[0]
+        try:
+            rendered = yaml.safe_load(interpolate(compose, env)) or {}
+            check_store_files(rendered, app_dir)
+        except (ComposeError, yaml.YAMLError, ValueError) as err:
+            raise AppError(f"{app_key}: {err}") from err
+        return host_access(rendered, app_dir, self.data_root)
+
+    async def _async_allowed_access(self, app_key: str) -> list[str]:
+        """The access the user allowed for an installed store app; for one from
+        before this was asked, what its installed files have."""
+        store = self.get(app_key).store or {}
+        if store.get("access") is not None:
+            return list(store["access"])
+        app_dir = self.store_paths(app_key)[0]
+        compose = await self._read(f"{app_dir}/compose.yaml") or ""
+        env = parse_env_file(await self._read(f"{app_dir}/.env") or "")
+        try:
+            return self._access(compose, env, app_key)
+        except AppError:
+            return []
+
+    async def async_new_access(self, app_key: str, store_app: StoreApp) -> list[str]:
+        """Access the new package of an installed store app asks for beyond what
+        was allowed."""
+        store = self.get(app_key).store or {}
+        compose, env = self._render(
+            store_app,
+            app_key,
+            dict(store.get("values") or {}),
+            store.get("renamed_containers", False),
+        )
+        allowed = await self._async_allowed_access(app_key)
+        return [a for a in self._access(compose, env, app_key) if a not in allowed]
+
+    async def async_allow_access(self, app_key: str, store_app: StoreApp) -> None:
+        """Allow the access of the new package, so the update can go ahead."""
+        settings = self.get(app_key)
+        if not settings.store:
+            raise AppError(f"{app_key} was not installed from a store")
+        new = await self.async_new_access(app_key, store_app)
+        allowed = await self._async_allowed_access(app_key)
+        settings.store["access"] = sorted({*allowed, *new})
+        await self.async_save()
+        self._notify()
+
     async def _async_ports_in_use(
         self, ports: set[int], published: set[int]
     ) -> set[int]:
@@ -1728,6 +1814,11 @@ class AppManager:
         )
         values = {"APP_PORT": str(web)} if web else {}
         compose, env = self._render(store_app, key, values)
+        try:
+            access = self._access(compose, env, key)
+        except AppError as err:
+            access = []
+            name_error = name_error or str(err)
         wanted = published_ports(interpolate(compose, env))
         published = published_host_ports(data)
         busy = await self._async_ports_in_use(wanted, published)
@@ -1754,6 +1845,7 @@ class AppManager:
             "name_error": name_error,
             "existing_data": existing_data,
             "reinstall": earlier is not None,
+            "access": access,  # to allow in the dialog
             # the dialog shows these instead of the store defaults; generated
             # secrets are not asked, so they don't leave the server
             "values": {

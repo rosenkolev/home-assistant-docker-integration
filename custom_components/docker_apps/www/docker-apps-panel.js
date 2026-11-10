@@ -489,8 +489,10 @@ class DockerAppsPanel extends HTMLElement {
 
     let banner = "";
     if (update?.blocked) {
+      const allow = update.new_access?.length && !readOnly;
       banner = `<div class="banner hold">${icon("pause-circle-outline")}<div class="grow"><div class="title">Update on hold</div>
-        <div class="muted">${esc(update.blocked)}</div></div></div>`;
+        <div class="muted">${esc(update.blocked)}</div></div>
+        ${allow ? `<button class="btn primary" data-action="allow-update" ${data} ${busy ? "disabled" : ""}>Allow and update</button>` : ""}</div>`;
     } else if (!app.busy && this._hasUpdate(app)) {
       // while the app changes, a check can see it half updated: no banner then
       banner = `<div class="banner">${icon("arrow-up-circle-outline")}<div class="grow">
@@ -767,6 +769,13 @@ class DockerAppsPanel extends HTMLElement {
         case "update":
           if (await this._confirmUpdate(appInfo)) await this._callEntity("update", "install", appInfo);
           break;
+        case "allow-update": {
+          const list = appInfo.update.new_access.map((a) => `<li>${esc(a)}</li>`).join("");
+          if (!(await this._confirm(`Allow ${appInfo.name} more access?`, `${esc(appInfo.update.latest)} asks for new access to the host:<ul class="list">${list}</ul>Allow it and update?`, "Allow and update"))) break;
+          await this._call("manage", { app, allow_host_access: true });
+          await this._callEntity("update", "install", appInfo);
+          break;
+        }
         case "skip":
           await this._callEntity("update", "skip", appInfo);
           this._toast(`${appInfo.name} ${appInfo.update.latest} skipped`);
@@ -1324,6 +1333,8 @@ class DockerAppsPanel extends HTMLElement {
     let lastPorts;
     let lastFirst;
     let useExisting = false;
+    let allowAccess = false;
+    let allowedKey = "[]";
     const showPorts = (ports, first = false) => {
       lastPorts = ports;
       lastFirst = first;
@@ -1363,6 +1374,19 @@ class DockerAppsPanel extends HTMLElement {
           else if (input && input.value === input.defaultValue) input.value = value;
         }
       }
+      // a different list (another name moves the folders) is asked again
+      const accessKey = JSON.stringify(ports.access || []);
+      if (accessKey !== allowedKey) allowAccess = false;
+      allowedKey = accessKey;
+      if (ports.access?.length) {
+        // access beyond its own folders and ports: the user decides
+        notes.push([
+          allowAccess ? "info" : "bad",
+          `${esc(app.name)} asks for access to the host:<ul class="list">${ports.access.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+           <label class="toggle"><input type="checkbox" id="allow-access" ${allowAccess ? "checked" : ""}> I trust this app with this access</label>`,
+        ]);
+        blocked = blocked || !allowAccess;
+      }
       dialog.querySelector("#ports").innerHTML = notes
         .map(([cls, text]) => `<div class="banner ${cls === "bad" ? "error" : ""}">${icon(cls === "bad" ? "alert-circle-outline" : "information-outline")}<div class="grow text">${text}</div></div>`)
         .join("");
@@ -1373,8 +1397,9 @@ class DockerAppsPanel extends HTMLElement {
     let portCheck = 0; // only the newest port check may change the notes
     dialog.oninput = (ev) => {
       ev.target.classList.remove("invalid");
-      if (ev.target.id === "use-existing") {
-        useExisting = ev.target.checked;
+      if (ev.target.id === "use-existing" || ev.target.id === "allow-access") {
+        if (ev.target.id === "use-existing") useExisting = ev.target.checked;
+        else allowAccess = ev.target.checked;
         showPorts(lastPorts, lastFirst);
         return;
       }
@@ -1414,7 +1439,7 @@ class DockerAppsPanel extends HTMLElement {
       });
       const name = dialog.querySelector("#app-name").value;
       const installed = await this._save(dialog, button, "Installing…", () =>
-        this._call("install", { store_app: storeId, name, values, use_existing_data: useExisting && Boolean(lastPorts?.existing_data) }, true),
+        this._call("install", { store_app: storeId, name, values, use_existing_data: useExisting && Boolean(lastPorts?.existing_data), allow_host_access: allowAccess && Boolean(lastPorts?.access?.length) }, true),
       );
       if (installed) {
         this._toast(`${app.name} installed`);

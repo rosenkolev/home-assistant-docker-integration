@@ -124,7 +124,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         _, runtime = get_runtime(hass)
         changes = dict(call.data)
         app = get_app(runtime, changes.pop(ATTR_APP))
-        await runtime.manager.async_configure(app.key, **changes)
+        if changes.pop("allow_host_access", False):
+            update = (runtime.updates.data or {}).get(app.key)
+            if not update or not update.store_app:
+                raise ServiceValidationError(f"{app.key} has no app store update")
+            await _call(runtime.manager.async_allow_access(app.key, update.store_app))
+        if changes:
+            await runtime.manager.async_configure(app.key, **changes)
         await runtime.updates.async_check_now()
 
     async def update_services(call: ServiceCall) -> ServiceResponse:
@@ -255,6 +261,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                     values=call.data.get("values"),
                     data=runtime.docker.data,
                     use_existing_data=call.data["use_existing_data"],
+                    allow_host_access=call.data["allow_host_access"],
                 )
             )
         except HomeAssistantError as err:
@@ -312,6 +319,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("exclude"): tag_filter,
                 vol.Optional("upstream"): cv.string,
                 vol.Optional("allow_db_minor"): cv.boolean,
+                vol.Optional("allow_host_access"): cv.boolean,
             },
         ),
         "update_services": (
@@ -382,6 +390,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("name"): cv.string,
                 vol.Optional("values"): {cv.string: cv.string},
                 vol.Optional("use_existing_data", default=False): cv.boolean,
+                vol.Optional("allow_host_access", default=False): cv.boolean,
             },
         ),
         "uninstall": (
