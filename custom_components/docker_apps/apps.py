@@ -14,6 +14,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+import posixpath
 from pathlib import PurePosixPath
 
 import yaml
@@ -1356,7 +1357,7 @@ class AppManager:
                 # settings of an app whose containers were removed outside are stale
                 installed = None
                 self.settings.pop(app_key, None)
-                earlier = await self._check_folder(store_app, app_dir)
+                earlier = await self._check_folder(store_app, app_key)
                 new_folders = [app_dir] if earlier is None else []
                 if not await self._async_exists(data_dir):
                     new_folders.append(data_dir)
@@ -1531,7 +1532,7 @@ class AppManager:
             name_error = f"An app named {key} already exists. Choose another name."
         else:
             try:
-                earlier = await self._check_folder(store_app, self.store_paths(key)[0])
+                earlier = await self._check_folder(store_app, key)
             except AppError as err:
                 name_error = str(err)
         # a reinstall offers the web port of the earlier install
@@ -1577,21 +1578,45 @@ class AppManager:
             },
         }
 
+    def _root_folder(self, folder: str) -> str | None:
+        """Which root folder this app or data folder is or holds: never used for one
+        app, as removing its data would remove every app's."""
+        path = posixpath.normpath(folder)
+        for root, what in ((self.apps_root, "apps"), (self.data_root, "data")):
+            root = posixpath.normpath(root)
+            if path == "/" or path == root or root.startswith(f"{path}/"):
+                return f"The folder `{folder}` is or holds the {what} folder"
+        return None
+
     async def _check_folder(
-        self, store_app: StoreApp, app_dir: str
+        self, store_app: StoreApp, app_key: str
     ) -> dict[str, str] | None:
-        """Whether a store app can go into this folder: None when the folder is
-        missing or empty. A folder with the manifest of the same store app is an
-        earlier install (removed keeping its files, pruned, or copied from another
-        server): its values (passwords, web port) are returned to be kept. Any other
-        folder belongs to someone else and is never written: AppError.
+        """Whether a store app can go into its folders: None when they are missing
+        or empty. An app folder with the manifest of the same store app is an earlier
+        install (removed keeping its files, pruned, or copied from another server):
+        its values (passwords, web port) are returned to be kept, and its data folder
+        is used again. Any other folder belongs to someone else and is never written:
+        AppError, also for a data folder with files next to a new app folder.
         """
+        app_dir, data_dir = self.store_paths(app_key)
+        for folder in (app_dir, data_dir):
+            if problem := self._root_folder(folder):
+                raise AppError(f"{problem}. Choose another name.")
         local = self.local_path(app_dir)
+        data_local = self.paths.to_local(data_dir)  # not mounted: nothing to check
+
+        def empty(path: str) -> bool:
+            return not os.path.exists(path) or (
+                os.path.isdir(path) and not os.listdir(path)
+            )
 
         def check() -> dict[str, str] | None:
-            if not os.path.exists(local) or (
-                os.path.isdir(local) and not os.listdir(local)
-            ):
+            if empty(local):
+                if data_local and not empty(data_local):
+                    raise AppError(
+                        f"The data folder `{data_dir}` already has files. "
+                        "Choose another name."
+                    )
                 return None
             try:
                 owner = json.loads(read_text(f"{local}/{META_DIR}/manifest.json") or "")
@@ -1638,12 +1663,14 @@ class AppManager:
         if self.self_service(data, app.key):
             raise AppError("Home Assistant can't remove its own app")
         remove_data = remove_data and bool(self.get(app.key).store)
-        # check first, so nothing is removed when the data can't be deleted
-        folders = (
-            [self.local_path(f) for f in self.store_paths(app.key)]
-            if remove_data
-            else []
-        )
+        folders = []
+        for folder in self.store_paths(app.key) if remove_data else ():
+            if problem := self._root_folder(folder):
+                # an install from before this check: the root stays
+                _LOGGER.warning("%s; it is not removed with %s", problem, app.key)
+                continue
+            # check first, so nothing is removed when the data can't be deleted
+            folders.append(self.local_path(folder))
         async with self._operation(app.key, "uninstall"):
             if app.is_compose:
                 # by the project label: works when the compose files were deleted

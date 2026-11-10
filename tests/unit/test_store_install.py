@@ -80,15 +80,18 @@ async def test__install_copies_the_data_folder_but_keeps_user_files(manager, tmp
     app = store_app("1.10.0", 3)
     app.files = {"config.yaml": "new", "users.yml.template": "secret: {{SECRET}}"}
     data_dir = tmp_path / "data" / "whoami" / "data"
-    data_dir.mkdir(parents=True)
-    (data_dir / "config.yaml").write_text("mine", encoding="utf-8")
 
     await manager.async_install_store_app(app, data=await manager.client.async_fetch())
-
-    assert (data_dir / "config.yaml").read_text(encoding="utf-8") == "mine"
     env = (tmp_path / "apps" / "whoami" / ".env").read_text(encoding="utf-8")
     secret = next(line[7:] for line in env.splitlines() if line.startswith("SECRET="))
     assert (data_dir / "users.yml").read_text(encoding="utf-8") == f"secret: {secret}"
+    assert (data_dir / "config.yaml").read_text(encoding="utf-8") == "new"
+
+    # the user changes the config; a reinstall keeps the change
+    (data_dir / "config.yaml").write_text("mine", encoding="utf-8")
+    manager.client.containers.clear()
+    await manager.async_install_store_app(app, data=await manager.client.async_fetch())
+    assert (data_dir / "config.yaml").read_text(encoding="utf-8") == "mine"
 
 
 async def test__package_update_keeps_secrets_and_override(manager, tmp_path):
@@ -321,6 +324,68 @@ async def test__uninstall_with_data_removes_folders(manager, tmp_path):
     assert not (tmp_path / "apps" / "whoami").exists()
     assert not (tmp_path / "data" / "whoami").exists()
     assert manager.get("whoami").store is None
+
+
+async def test__install_refuses_a_data_folder_with_files_of_someone_else(
+    manager, tmp_path
+):
+    mine = tmp_path / "data" / "whoami"
+    mine.mkdir(parents=True)
+    (mine / "photos.db").write_text("mine")
+    data = await manager.client.async_fetch()
+    ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
+    assert "data folder `" in ports["name_error"]
+
+    with pytest.raises(AppError, match="already has files"):
+        await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert (mine / "photos.db").read_text() == "mine"
+    assert not (tmp_path / "apps" / "whoami").exists()
+
+
+async def test__reinstall_uses_its_data_folder_again(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    (tmp_path / "data" / "whoami").mkdir(parents=True)
+    (tmp_path / "data" / "whoami" / "app.db").write_text("kept")
+    manager.client.containers.clear()  # removed keeping its files
+    data = await manager.client.async_fetch()
+
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    assert (tmp_path / "data" / "whoami" / "app.db").read_text() == "kept"
+
+
+@pytest.mark.parametrize(
+    ("apps", "data_root", "name"), [("apps", "", "apps"), ("", "data", "data")]
+)
+async def test__install_refuses_a_name_that_is_a_root_folder(
+    tmp_path, monkeypatch, apps, data_root, name
+):
+    monkeypatch.setattr(apps_module, "Store", MemoryStore)
+    root = tmp_path.as_posix()
+    manager = AppManager(
+        fake_hass(),
+        "entry",
+        FakeDocker(),
+        FakeRegistry(),
+        f"{root}/{apps}".rstrip("/"),
+        f"{root}/{data_root}".rstrip("/"),
+    )
+    await manager.async_setup()
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match="is or holds the"):
+        await manager.async_install_store_app(store_app("1.10.0", 3), name, data=data)
+
+
+async def test__uninstall_never_removes_a_root_folder(manager, tmp_path):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    # an install from before the check: its data folder holds the apps folder
+    manager.apps_root = f"{tmp_path.as_posix()}/data/whoami/projects"
+    (tmp_path / "data" / "whoami" / "projects").mkdir(parents=True)
+
+    await manager.async_uninstall(data.apps["whoami"], data, remove_data=True)
+    assert (tmp_path / "data" / "whoami" / "projects").exists()
 
 
 async def test__uninstall_refuses_to_delete_unmounted_data(manager, tmp_path):
