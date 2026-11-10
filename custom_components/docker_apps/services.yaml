@@ -50,6 +50,10 @@ manage:
     allow_host_access:
       selector:
         boolean:
+    allowed_access:
+      selector:
+        text:
+          multiple: true
 update_services:
   fields:
     app:
@@ -172,6 +176,10 @@ install:
     allow_host_access:
       selector:
         boolean:
+    allowed_access:
+      selector:
+        text:
+          multiple: true
 uninstall:
   fields:
     app:

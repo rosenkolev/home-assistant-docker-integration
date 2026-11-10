@@ -1556,13 +1556,16 @@ class AppManager:
         data: DockerData | None = None,
         use_existing_data: bool = False,
         allow_host_access: bool = False,
+        allowed_access: list[str] | None = None,
     ) -> str:
         """Install a store app, or install the new package of an installed one.
 
         `use_existing_data` takes a data folder that already has files (data moved
         from another server or CasaOS) instead of refusing it. Access to the host
         (Docker, host folders, privileged...) needs `allow_host_access`; for an
-        update, only access the user hasn't allowed before.
+        update, only access the user hasn't allowed before. `allowed_access` is the
+        access the user was shown: a package that asks for more (the store changed
+        in the meantime) is refused.
         """
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
@@ -1621,7 +1624,10 @@ class AppManager:
                 new_access = [a for a in access if a not in allowed]
             else:
                 new_access = access
-            if new_access and not allow_host_access:
+            if new_access and not (
+                allow_host_access
+                and (allowed_access is None or set(new_access) <= set(allowed_access))
+            ):
                 raise HostAccessError(store_app.name, new_access, update=is_update)
             if data is not None and not is_update:
                 wanted = published_ports(interpolate(compose, env))
@@ -1719,7 +1725,7 @@ class AppManager:
         secrets = [
             env[v.key]
             for v in store_app.variables
-            if v.type == "random" and env.get(v.key)
+            if v.type in ("random", "password") and env.get(v.key)
         ]
 
         def write() -> None:
@@ -1733,7 +1739,7 @@ class AppManager:
                     folders.append(folder)
                     folder = os.path.dirname(folder)
                 if any(secret in text for secret in secrets):
-                    # a generated password in it: the owner's (the app's PUID)
+                    # a password in it: the owner's (the app's PUID)
                     write_text(target, text, private=True, owner=self.owner)
                 else:
                     write_text(target, text)
@@ -1814,12 +1820,17 @@ class AppManager:
 
         return await self.hass.async_add_executor_job(new_access)
 
-    async def async_allow_access(self, app_key: str, store_app: StoreApp) -> None:
-        """Allow the access of the new package, so the update can go ahead."""
+    async def async_allow_access(
+        self, app_key: str, store_app: StoreApp, shown: list[str] | None = None
+    ) -> None:
+        """Allow the access of the new package, so the update can go ahead.
+        `shown` is the access the user saw: one that asks for more is refused."""
         settings = self.get(app_key)
         if not settings.store:
             raise AppError(f"{app_key} was not installed from a store")
         new = await self.async_new_access(app_key, store_app)
+        if shown is not None and (more := [a for a in new if a not in shown]):
+            raise HostAccessError(store_app.name, more, update=True)
         allowed = await self._async_allowed_access(app_key)
         settings.store["access"] = sorted({*allowed, *new})
         await self.async_save()

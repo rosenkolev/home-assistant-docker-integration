@@ -217,6 +217,10 @@
         "allow_host_access": {
           "name": "Allow new host access",
           "description": "Allow the access to the host (Docker, host folders, devices, privileged mode) that the pending app store update asks for, so it can be installed."
+        },
+        "allowed_access": {
+          "name": "Access shown",
+          "description": "The access the update was shown with. When the update asks for more (the app store changed in the meantime), nothing is allowed."
         }
       }
     },
@@ -379,6 +383,10 @@
         "allow_host_access": {
           "name": "Allow host access",
           "description": "Install an app that asks for access to the host: Docker, host folders, devices, host network or privileged mode. Without it, such an app is refused with the list of what it asks for."
+        },
+        "allowed_access": {
+          "name": "Access shown",
+          "description": "The access the app was shown with. When the app asks for more (the app store changed in the meantime), it is refused."
         }
       }
     },

@@ -743,6 +743,65 @@ async def test__data_files_with_a_generated_password_are_private(manager, monkey
     assert ("config.yaml", False, None) in calls
 
 
+async def test__data_files_with_a_typed_password_are_private(manager, monkeypatch):
+    calls = []
+    real = apps_module.write_text
+    monkeypatch.setattr(
+        apps_module,
+        "write_text",
+        lambda path, text, private=False, owner=None: calls.append(
+            (path.replace("\\", "/").rsplit("/", 1)[-1], private)
+        )
+        or real(path, text, private, owner),
+    )
+    fields = [
+        *CONFIG["form_fields"],
+        {"type": "password", "label": "Admin", "env_variable": "ADMIN_PASSWORD"},
+    ]
+    app = parse_runtipi(
+        json.dumps({**CONFIG, "form_fields": fields}), COMPOSE, None, "tipi"
+    )
+    app.files = {"admin.yml.template": "password: {{ADMIN_PASSWORD}}"}
+    await manager.async_install_store_app(
+        app,
+        values={"ADMIN_PASSWORD": "typed-by-me"},
+        data=await manager.client.async_fetch(),
+    )
+    assert ("admin.yml", True) in calls
+
+
+async def test__install_is_refused_when_the_app_asks_more_than_shown(manager):
+    app = app_with(DOCKER_SOCK + "    privileged: true\n")
+    data = await manager.client.async_fetch()
+    shown = ["Full control of Docker (/var/run/docker.sock)"]
+    # the store changed while the dialog was open: privileged was not shown
+    with pytest.raises(HostAccessError, match="Privileged mode"):
+        await manager.async_install_store_app(
+            app, data=data, allow_host_access=True, allowed_access=shown
+        )
+    assert not manager.client.containers
+    await manager.async_install_store_app(
+        app,
+        data=data,
+        allow_host_access=True,
+        allowed_access=[
+            *shown,
+            "Privileged mode (all devices, can leave the container)",
+        ],
+    )
+
+
+async def test__allowing_an_update_is_refused_when_it_asks_more_than_shown(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    new = app_with(DOCKER_SOCK + "    network_mode: host\n", "1.11.0", 4)
+    with pytest.raises(HostAccessError, match="Host network"):
+        await manager.async_allow_access(
+            "whoami", new, ["Full control of Docker (/var/run/docker.sock)"]
+        )
+    assert manager.get("whoami").store["access"] == []
+
+
 @pytest.mark.parametrize(
     ("values", "error"),
     [

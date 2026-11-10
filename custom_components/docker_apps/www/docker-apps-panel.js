@@ -772,7 +772,7 @@ class DockerAppsPanel extends HTMLElement {
         case "allow-update": {
           const list = appInfo.update.new_access.map((a) => `<li>${esc(a)}</li>`).join("");
           if (!(await this._confirm(`Allow ${appInfo.name} more access?`, `${esc(appInfo.update.latest)} asks for new access to the host:<ul class="list">${list}</ul>Allow it and update?`, "Allow and update"))) break;
-          await this._call("manage", { app, allow_host_access: true });
+          await this._call("manage", { app, allow_host_access: true, allowed_access: appInfo.update.new_access });
           await this._callEntity("update", "install", appInfo);
           break;
         }
@@ -1439,7 +1439,7 @@ class DockerAppsPanel extends HTMLElement {
       });
       const name = dialog.querySelector("#app-name").value;
       const installed = await this._save(dialog, button, "Installing…", () =>
-        this._call("install", { store_app: storeId, name, values, use_existing_data: useExisting && Boolean(lastPorts?.existing_data), allow_host_access: allowAccess && Boolean(lastPorts?.access?.length) }, true),
+        this._call("install", { store_app: storeId, name, values, use_existing_data: useExisting && Boolean(lastPorts?.existing_data), allow_host_access: allowAccess && Boolean(lastPorts?.access?.length), allowed_access: lastPorts?.access || [] }, true),
       );
       if (installed) {
         this._toast(`${app.name} installed`);
