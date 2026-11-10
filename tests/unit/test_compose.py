@@ -494,6 +494,20 @@ async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
     assert "immich_default" not in docker.networks
 
 
+async def test__engine_up_should_keep_containers_of_profile_services():
+    docker = FakeDocker()
+    engine = ComposeEngine(docker)
+    m = model()
+    assert m.inactive == {"debug"}
+    # as `docker compose --profile debug up -d` leaves it
+    started = model()
+    started.services["debug"] = {"image": "busybox"}
+    await engine.async_up(started)
+    await engine.async_up(m, force_recreate=True)
+    assert ("remove", "immich-debug-1") not in docker.calls
+    assert "immich-debug-1" in {c["Names"][0][1:] for c in docker.containers.values()}
+
+
 async def test__recreate_keeps_anonymous_volumes_and_labels_new_ones():
     docker = FakeDocker()
     engine = ComposeEngine(docker)

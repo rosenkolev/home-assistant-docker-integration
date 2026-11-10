@@ -281,6 +281,9 @@ class ComposeModel:
     volumes: dict[str, dict]
     secrets: dict[str, dict] = field(default_factory=dict)
     configs: dict[str, dict] = field(default_factory=dict)
+    # services with a profile: not started here, and their containers (started with
+    # `--profile`) are no orphans
+    inactive: set[str] = field(default_factory=set)
 
     def resolve(self, path: str) -> str:
         """Resolve a host path relative to the project folder."""
@@ -319,10 +322,12 @@ def load_model(
     data = interpolate(data, env)
     project = data.get("name") or project
     services = {}
+    inactive = set()
     for name, service in (data.get("services") or {}).items():
         service = dict(service or {})
         if service.get("profiles"):
-            continue  # profiles are opt-in and none is active
+            inactive.add(name)  # profiles are opt-in and none is active
+            continue
         if not service.get("image"):
             raise ComposeError(
                 f"service '{name}' has no image ('build' is not supported)"
@@ -339,6 +344,7 @@ def load_model(
         volumes={k: v or {} for k, v in (data.get("volumes") or {}).items()},
         secrets={k: v or {} for k, v in (data.get("secrets") or {}).items()},
         configs={k: v or {} for k, v in (data.get("configs") or {}).items()},
+        inactive=inactive,
     )
 
     if read_file is not None:
@@ -1296,7 +1302,7 @@ class ComposeEngine:
 
         if remove_orphans and services is None:
             for service, containers in by_service.items():
-                if service not in model.services:
+                if service not in model.services and service not in model.inactive:
                     for raw in containers:
                         _LOGGER.info("Removing orphan container %s", raw["Names"][0])
                         await self.async_remove(raw["Id"])
