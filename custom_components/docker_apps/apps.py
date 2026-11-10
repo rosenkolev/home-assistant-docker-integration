@@ -1353,11 +1353,10 @@ class AppManager:
         files = render_files(store_app, env)
         if not files:
             return
-        data_dir = os.path.realpath(
-            self.local_path(f"{self.store_paths(app_key)[1]}/data")
-        )
+        local = self.local_path(f"{self.store_paths(app_key)[1]}/data")
 
         def write() -> None:
+            data_dir = os.path.realpath(local)  # reads the disk: not in the loop
             for path, text in files.items():
                 target = os.path.realpath(os.path.join(data_dir, path))
                 if not target.startswith(data_dir + os.sep) or os.path.exists(target):
