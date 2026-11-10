@@ -200,6 +200,30 @@ class FakeDocker:
                             "Type": proto,
                         }
                     )
+        host = config.get("HostConfig", {})
+        # like the container list: binds, anonymous volumes and long-syntax mounts
+        mounts = [
+            {
+                "Type": "bind",
+                "Destination": b.split(":")[1],
+                "RW": not b.endswith(":ro"),
+            }
+            for b in host.get("Binds") or []
+        ]
+        mounts += [
+            {"Type": "volume", "Destination": t, "RW": True}
+            for t in config.get("Volumes") or {}
+        ]
+        mounts += [
+            {
+                "Type": m.get("Type"),
+                # a volume without source is new and anonymous: Docker names it
+                "Name": m.get("Source") or new_id(),
+                "Destination": m["Target"],
+                "RW": not m.get("ReadOnly"),
+            }
+            for m in host.get("Mounts") or []
+        ]
         self.containers[cid] = {
             "Id": cid,
             "Names": [f"/{name or cid[:12]}"],
@@ -209,6 +233,7 @@ class FakeDocker:
             "State": "created",
             "Status": "Created",
             "Ports": ports,
+            "Mounts": mounts,
             "Config": config,
             "HostConfig": config.get("HostConfig", {}),
         }

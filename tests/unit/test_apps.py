@@ -10,7 +10,13 @@ from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._compose import load_model
 from custom_components.docker_apps._models import LABEL_PROJECT
 from custom_components.docker_apps._registry import RegistryError
-from custom_components.docker_apps.apps import AppError, AppManager, own_container_id
+from custom_components.docker_apps._docker_client import DockerError
+from custom_components.docker_apps.apps import (
+    AppError,
+    AppManager,
+    UpdateKeptError,
+    own_container_id,
+)
 from tests.fake_docker import FakeDocker, FakeRegistry
 
 COMPOSE = """\
@@ -244,7 +250,24 @@ async def test__rollback_should_restore_files(setup, project):
     assert manager.get("immich").history == []
 
 
-async def test__failed_health_should_roll_back(setup, project, monkeypatch):
+async def test__failed_pull_should_roll_back(setup, project, monkeypatch):
+    manager, docker, data = setup
+    await manager.async_configure("immich", managed=True)
+    update = (await manager.async_check_updates(data, {}))["immich"]
+
+    async def pull_fails(*args, **kwargs):
+        raise DockerError(404, "The image does not exist")
+
+    monkeypatch.setattr(manager.engine, "async_pull", pull_fails)
+    with pytest.raises(AppError, match="rolled back"):
+        await manager.async_update(data.apps["immich"], update, data)
+    assert "IMMICH_VERSION=v2.1.0\n" in open(f"{project}/.env", encoding="utf-8").read()
+
+
+@pytest.mark.parametrize("keeps_data", [True, False])
+async def test__failed_health_after_start_rolls_back_only_apps_without_data(
+    setup, project, monkeypatch, keeps_data
+):
     manager, docker, data = setup
     await manager.async_configure("immich", managed=True)
     update = (await manager.async_check_updates(data, {}))["immich"]
@@ -253,9 +276,23 @@ async def test__failed_health_should_roll_back(setup, project, monkeypatch):
         raise AppError("immich-server is unhealthy")
 
     monkeypatch.setattr(manager, "_async_wait_healthy", unhealthy)
-    with pytest.raises(AppError, match="rolled back"):
-        await manager.async_update(data.apps["immich"], update, data)
-    assert "IMMICH_VERSION=v2.1.0\n" in open(f"{project}/.env", encoding="utf-8").read()
+    if keeps_data:
+        # the new version may have migrated its data: it stays
+        with open(f"{project}/compose.yaml", "a", encoding="utf-8") as file:
+            file.write("    volumes:\n      - ./db:/var/lib/postgresql/data\n")
+        with pytest.raises(UpdateKeptError, match="was not rolled back"):
+            await manager.async_update(data.apps["immich"], update, data)
+        assert (
+            "IMMICH_VERSION=v2.2.0" in open(f"{project}/.env", encoding="utf-8").read()
+        )
+        assert manager.get("immich").history  # to roll back to by hand
+    else:
+        # nothing written anywhere: going back is always safe
+        with pytest.raises(AppError, match="rolled back"):
+            await manager.async_update(data.apps["immich"], update, data)
+        assert (
+            "IMMICH_VERSION=v2.1.0" in open(f"{project}/.env", encoding="utf-8").read()
+        )
 
 
 async def test__update_single_untracked_service(setup, project):

@@ -12,7 +12,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from ._docker_client import DockerError
-from .apps import AppError, AppUpdate
+from .apps import AppError, AppUpdate, UpdateKeptError, notify_update_kept
 from .const import DOMAIN
 from .coordinator import DockerAppsConfigEntry
 from .entity import AppEntity, app_unique_id
@@ -162,6 +162,8 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
             else:
                 raise HomeAssistantError("no update available")
         except (AppError, DockerError) as err:
+            if isinstance(err, UpdateKeptError):
+                notify_update_kept(self.hass, self.app_key, err)
             raise HomeAssistantError(str(err)) from err
         await self.runtime.docker.async_refresh()
         await self.coordinator.async_check_now()

@@ -776,7 +776,7 @@ class DockerAppsPanel extends HTMLElement {
           this._toast(`${service} ${tag} skipped`);
           break;
         case "rollback": {
-          const version = await this._pick(`Roll back ${appInfo.name}`, "Bring back the compose files of an earlier version.", appInfo.history);
+          const version = await this._pick(`Roll back ${appInfo.name}`, "Bring back the compose files of an earlier version. Its data is not rolled back: if the newer version already changed it (for example a database upgrade), the earlier version may not start.", appInfo.history);
           if (version) await this._callEntity("update", "install", appInfo, { version });
           break;
         }

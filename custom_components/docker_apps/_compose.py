@@ -42,6 +42,8 @@ LABEL_NETWORK = "com.docker.compose.network"
 LABEL_VOLUME = "com.docker.compose.volume"
 LABEL_DEPENDS_ON = "com.docker.compose.depends_on"
 ENGINE_VERSION = "docker-apps"
+# Docker names anonymous volumes with 64 hex characters
+ANONYMOUS = re.compile(r"[0-9a-f]{64}")
 HEALTH_TIMEOUT = 600
 SYSTEMPATHS_UNCONFINED = "systempaths=unconfined"
 
@@ -501,6 +503,40 @@ def _resource_name(specs: dict[str, dict], project: str, key: str) -> str:
 
 def _volume_name(model: ComposeModel, name: str) -> str:
     return _resource_name(model.volumes, model.project, name)
+
+
+def anonymous_mounts(
+    config: dict, labels: dict, image_volumes: dict | None, old_mounts: list[dict]
+) -> None:
+    """Anonymous volumes (`- /data` and the image's own VOLUMEs) as mounts.
+
+    The old container's volume at the same path is used again, as docker compose
+    does: without it, every update or recreate would start with an empty one. A
+    new one gets the app's labels, so it is known as the app's data.
+    """
+    host = config.setdefault("HostConfig", {})
+    mounts = host.setdefault("Mounts", [])
+    taken = {b.split(":")[1] for b in host.get("Binds") or []}
+    taken |= {m["Target"] for m in mounts}
+    previous = {
+        m["Destination"]: m["Name"]
+        for m in old_mounts
+        if m.get("Type") == "volume" and ANONYMOUS.fullmatch(m.get("Name") or "")
+    }
+    for target in {**(config.pop("Volumes", None) or {}), **(image_volumes or {})}:
+        if target in taken:
+            continue
+        if target in previous:
+            mounts.append(
+                {"Type": "volume", "Source": previous[target], "Target": target}
+            )
+        else:
+            options = {"Labels": labels}
+            mounts.append(
+                {"Type": "volume", "Target": target, "VolumeOptions": options}
+            )
+    if not mounts:
+        del host["Mounts"]
 
 
 def parse_volumes(
@@ -1005,13 +1041,16 @@ class ComposeEngine:
 
     async def async_image_id(self, image: str) -> str:
         """Id of a local image; pulled first when missing."""
+        return (await self._async_image(image))["Id"]
+
+    async def _async_image(self, image: str) -> dict:
         info = await self.client.async_image_inspect(image)
         if info is None:
             await self.async_pull_image(image)
             info = await self.client.async_image_inspect(image)
         if info is None:
             raise ComposeError(f"image {image} not found")
-        return info["Id"]
+        return info
 
     async def _wait_for(self, container_id: str, condition: str, name: str) -> None:
         if condition == "service_started":
@@ -1046,8 +1085,13 @@ class ComposeEngine:
         remove_orphans: bool = True,
         progress: Progress | None = None,
         skip: set[str] | None = None,
+        started: list[str] | None = None,
     ) -> None:
-        """Create or update the project, like `docker compose up -d`."""
+        """Create or update the project, like `docker compose up -d`.
+
+        `started` gets the services whose new container started: from then on the
+        new version may have changed its data (a database migration).
+        """
         order = start_order(model, services)
         await self._ensure_volumes(model)
         needed = set()
@@ -1070,7 +1114,7 @@ class ComposeEngine:
             if skip and name in skip:
                 continue
             running[name] = await self._apply_service(
-                model, name, by_service.get(name, []), running, force_recreate
+                model, name, by_service.get(name, []), running, force_recreate, started
             )
 
         if remove_orphans and services is None:
@@ -1087,9 +1131,11 @@ class ComposeEngine:
         current: list[dict],
         running: dict[str, str],
         force: bool,
+        started: list[str] | None = None,
     ) -> str:
         config = build_container_config(model, name, running)
-        image_id = await self.async_image_id(config["Image"])
+        image = await self._async_image(config["Image"])
+        image_id = image["Id"]
         wanted_hash = config["Labels"][LABEL_CONFIG_HASH]
 
         target = container_name(model, name)
@@ -1118,6 +1164,12 @@ class ComposeEngine:
                 await self.client.async_container_action(keep["Id"], "start")
             return keep["Id"]
 
+        anonymous_mounts(
+            config,
+            {LABEL_PROJECT: model.project, LABEL_SERVICE: name},
+            (image.get("Config") or {}).get("Volumes"),
+            [m for raw in old for m in raw.get("Mounts") or []],
+        )
         # create before removing the old container: a config that Docker refuses
         # leaves the running app as it is
         container_id = await self.client.async_container_create(
@@ -1135,6 +1187,8 @@ class ComposeEngine:
             )
             await self.client.async_network_connect(extra, container_id, endpoint)
         await self.client.async_container_action(container_id, "start")
+        if started is not None:
+            started.append(name)
         return container_id
 
     async def async_remove(self, container_id: str, volumes: bool = False) -> None:

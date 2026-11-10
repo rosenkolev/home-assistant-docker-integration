@@ -370,6 +370,45 @@ async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
     assert "immich_default" not in docker.networks
 
 
+async def test__recreate_keeps_anonymous_volumes_and_labels_new_ones():
+    docker = FakeDocker()
+    engine = ComposeEngine(docker)
+    m = load_model(
+        "pg",
+        "/srv/pg",
+        {
+            "/srv/pg/compose.yaml": "services:\n  db:\n    image: postgres:16\n"
+            "    volumes:\n      - /cache\n"
+        },
+        None,
+    )
+    docker.add_image("postgres:16")
+    # the image declares its own volume, which the compose file doesn't name
+    docker.images["postgres:16"]["Config"] = {
+        "Volumes": {"/var/lib/postgresql/data": {}}
+    }
+
+    await engine.async_up(m)
+    first = next(iter(docker.containers.values()))
+    mounts = first["HostConfig"]["Mounts"]
+    assert {mount["Target"] for mount in mounts} == {
+        "/cache",
+        "/var/lib/postgresql/data",
+    }
+    labels = {"com.docker.compose.project": "pg", "com.docker.compose.service": "db"}
+    assert all(mount["VolumeOptions"]["Labels"] == labels for mount in mounts)
+    names = {mount["Destination"]: mount["Name"] for mount in first["Mounts"]}
+
+    await engine.async_up(m, force_recreate=True)
+    second = next(iter(docker.containers.values()))
+    assert second["Id"] != first["Id"]
+    # the same volumes again: their data stays
+    reused = {
+        mount["Target"]: mount["Source"] for mount in second["HostConfig"]["Mounts"]
+    }
+    assert reused == names
+
+
 async def test__down_with_volumes_keeps_a_volume_another_container_uses():
     docker = FakeDocker()
     engine = ComposeEngine(docker)

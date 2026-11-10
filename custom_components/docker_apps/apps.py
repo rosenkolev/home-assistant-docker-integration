@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 
 import yaml
 from aiohttp import ClientError
+from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
@@ -95,6 +96,27 @@ COMPOSE_FILES = (
 
 class AppError(Exception):
     """An app operation failed."""
+
+
+class UpdateKeptError(AppError):
+    """An update whose new version started and then failed. It is not rolled back:
+    the new version may have changed its data (a database migration) in a way the
+    old one can't read. The backup stays, so the user can roll back."""
+
+
+def notify_update_kept(hass: HomeAssistant, app_key: str, err: Exception) -> None:
+    """Also outside the panel: an update can run from an automation."""
+    persistent_notification.async_create(
+        hass, str(err), title="Docker Apps", notification_id=f"{DOMAIN}_{app_key}"
+    )
+
+
+def update_kept(name: str, err: Exception) -> UpdateKeptError:
+    return UpdateKeptError(
+        f"{name} was updated, but {err}. It was not rolled back, as the new version "
+        "may already have changed its data. Check its logs; Roll back brings the "
+        "earlier version back."
+    )
 
 
 def compose_projects(folder: str) -> set[str]:
@@ -751,6 +773,7 @@ class AppManager:
         data: DockerData,
         pull: bool,
         force: bool = False,
+        started: list[str] | None = None,
     ) -> None:
         """Pull (optional) and bring the project up; self-updates are handed off."""
         if pull:
@@ -761,6 +784,7 @@ class AppManager:
             force_recreate=force,
             progress=self._progress(app_key, 60 if pull else 0, 100),
             skip={ha_service} if ha_service else None,
+            started=started,
         )
         if ha_service:
             from ._selfupdate import async_start_self_update
@@ -876,14 +900,35 @@ class AppManager:
             )
             for path, content in changed.items():
                 await self._write(path, content)
+            started: list[str] = []
             try:
-                await self._async_apply(app.key, model, data, pull=True)
+                await self._async_apply(
+                    app.key, model, data, pull=True, started=started
+                )
                 if not self.self_service(data, app.key):
                     await self._async_wait_healthy(model.project)
             except (ComposeError, DockerError, AppError) as err:
+                # an app that keeps no data can always go back
+                if started and await self._async_keeps_data(model.project, started):
+                    raise update_kept(app.name, err) from err
                 await self._async_restore(app, entry, data)
                 raise AppError(f"update failed and was rolled back: {err}") from err
             _LOGGER.info("Updated %s: %s", app.key, changes)
+
+    async def _async_keeps_data(self, project: str, services: list[str]) -> bool:
+        """Whether a started service can write to a volume or folder: also the
+        volumes an image declares itself (postgres, mariadb), which compose files
+        don't name. Unknown counts as yes."""
+        try:
+            containers = await self.engine.project_containers(project)
+        except DockerError:
+            return True
+        return any(
+            mount.get("RW", True)
+            for raw in containers
+            if (raw.get("Labels") or {}).get(LABEL_SERVICE) in services
+            for mount in raw.get("Mounts") or []
+        )
 
     async def _async_wait_healthy(self, project: str) -> None:
         """Wait until every container of the project runs and is healthy."""
@@ -1336,6 +1381,8 @@ class AppManager:
                     )
 
             backup = None
+            started: list[str] = []
+            failure: UpdateKeptError | None = None
             if installed:
                 backup = await self._async_backup(
                     app,
@@ -1359,15 +1406,21 @@ class AppManager:
                         override_path, f"{OVERRIDE_HEADER}services: {{}}\n"
                     )
                 model = await self.async_load_model(app)
-                await self._async_apply(app_key, model, data, pull=True)
+                await self._async_apply(
+                    app_key, model, data, pull=True, started=started
+                )
             except (AppError, ComposeError, DockerError, OSError) as err:
                 if backup is None:
                     # a failed first install leaves nothing behind, so it can be
                     # retried; a reinstall keeps the folders that were there
                     await self._async_discard_install(app_key, new_folders)
                     raise
-                await self._async_restore(app, backup, data)
-                raise AppError(f"update failed and was rolled back: {err}") from err
+                # an app that keeps no data can always go back
+                if not (started and await self._async_keeps_data(app_key, started)):
+                    await self._async_restore(app, backup, data)
+                    raise AppError(f"update failed and was rolled back: {err}") from err
+                # the new package stays and is recorded as installed
+                failure = update_kept(store_app.name, err)
             finally:
                 self.installing.pop(app_key, None)
 
@@ -1390,6 +1443,8 @@ class AppManager:
                 "renamed_containers": rename,
             }
             await self.async_save()
+        if failure:
+            raise failure
         return app_key
 
     async def _async_write_data_files(

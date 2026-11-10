@@ -21,7 +21,7 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from ._docker_client import DockerError
 from ._models import AppInfo, ContainerInfo
-from .apps import AppError
+from .apps import AppError, UpdateKeptError, notify_update_kept
 from .catalog import CatalogError
 from .const import DOMAIN
 from .coordinator import DockerAppsConfigEntry, DockerAppsRuntime
@@ -130,11 +130,15 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def update_services(call: ServiceCall) -> ServiceResponse:
         runtime = writable_runtime()
         app = get_app(runtime, call.data[ATTR_APP])
-        changes = await _call(
-            runtime.manager.async_update_services(
+        try:
+            changes = await runtime.manager.async_update_services(
                 app, call.data["services"], call.data.get("tag"), runtime.docker.data
             )
-        )
+        except UpdateKeptError as err:
+            notify_update_kept(hass, app.key, err)
+            raise HomeAssistantError(str(err)) from err
+        except (AppError, DockerError) as err:
+            raise HomeAssistantError(str(err)) from err
         await runtime.docker.async_refresh()
         await runtime.updates.async_check_now()
         return {"updated": changes}
