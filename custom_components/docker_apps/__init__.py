@@ -122,7 +122,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
     )
     await manager.async_setup()
     # how an update of this container went
-    await manager.async_check_self_update_at_start()
+    if await manager.async_check_self_update_at_start():
+        entry.async_create_background_task(
+            hass, manager.async_watch_self_update(), f"{DOMAIN} self-update"
+        )
     catalog = Catalog(hass, entry.entry_id, session)
     await catalog.async_load(_repositories(entry))
 

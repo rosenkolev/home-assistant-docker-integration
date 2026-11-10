@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import re
 import struct
@@ -38,6 +39,26 @@ DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10)
 STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
 # a pull with no progress at all for this long has stalled
 PULL_STALL_SECONDS = 300
+# longest log line kept while following; longer output is shown in parts
+MAX_LOG_LINE = 64 * 1024
+
+
+async def _log_payloads(
+    content: aiohttp.StreamReader, tty: bool
+) -> AsyncIterator[bytes]:
+    """Log bytes: as they come for a TTY, else the payloads of Docker's frames
+    (8-byte header: stream, 3 zero bytes, size)."""
+    if tty:
+        async for chunk in content.iter_any():
+            yield chunk
+        return
+    while True:
+        try:
+            header = await content.readexactly(8)
+        except asyncio.IncompleteReadError:
+            return
+        size = struct.unpack(">I", header[4:8])[0]
+        yield await content.readexactly(size)
 
 
 class DockerError(Exception):
@@ -251,23 +272,19 @@ class DockerClient:
             timeout=STREAM_TIMEOUT,
         )
         async with response:
-            if tty:
-                async for line in response.content:
-                    yield line.decode("utf-8", "replace").rstrip("\n")
-                return
-
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             buffer = ""
-            while True:
-                try:
-                    header = await response.content.readexactly(8)
-                except asyncio.IncompleteReadError:
-                    break
-                size = struct.unpack(">I", header[4:8])[0]
-                payload = await response.content.readexactly(size)
-                buffer += payload.decode("utf-8", "replace")
+            async for payload in _log_payloads(response.content, tty):
+                buffer += decoder.decode(payload)
                 *lines, buffer = buffer.split("\n")
+                if len(buffer) > MAX_LOG_LINE:
+                    # output with no line break (a progress bar): shown in parts,
+                    # not kept growing
+                    lines.append(buffer)
+                    buffer = ""
                 for line in lines:
                     yield line
+            buffer += decoder.decode(b"", final=True)
             if buffer:
                 yield buffer
 

@@ -2,6 +2,7 @@
 
 # cspell:words btrfs resolv
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -250,11 +251,14 @@ async def test__rollback_should_restore_files(setup, project):
         file.write("MINE=1\n")
 
     data = await docker.async_fetch()
+    restored = manager.get("immich").history[0]["dir"]
+    assert os.path.isdir(restored)
     await manager.async_rollback(data.apps["immich"], "v2.1.0", data, "v2.2.0")
     assert "IMMICH_VERSION=v2.1.0\n" in open(env, encoding="utf-8").read()
     # the version before the rollback, with the edit, is a backup to go forward to
     history = manager.get("immich").history
     assert [h["version"] for h in history] == ["v2.2.0"]
+    assert not os.path.exists(restored)  # in use again: no folder left behind
 
     data = await docker.async_fetch()
     await manager.async_rollback(data.apps["immich"], "v2.2.0", data)
@@ -299,7 +303,9 @@ async def test__failed_rollback_stays_on_the_version_it_had(
         await manager.async_rollback(data.apps["immich"], "v2.1.0", data, "v2.2.0")
     assert "IMMICH_VERSION=v2.2.0" in open(f"{project}/.env", encoding="utf-8").read()
     # the backup of the earlier version is still there to try again
-    assert "v2.1.0" in [h["version"] for h in manager.get("immich").history]
+    history = manager.get("immich").history
+    assert "v2.1.0" in [h["version"] for h in history]
+    assert all(os.path.isdir(h["dir"]) for h in history)
 
 
 async def test__failed_pull_should_roll_back(setup, project, monkeypatch):

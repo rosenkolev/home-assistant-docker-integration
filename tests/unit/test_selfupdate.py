@@ -156,3 +156,33 @@ async def test__setup_shows_a_rolled_back_update_and_fixes_the_history(
     settings = manager.get("ha")
     assert settings.history == [] and settings.store == {"version": "1"}
     assert not await manager.async_check_self_update()  # shown once
+
+
+async def test__setup_watches_a_helper_that_is_still_running(
+    manager, tmp_path, monkeypatch
+):
+    helper = {"Labels": {apps_module.LABEL_HELPER: "ha"}, "State": "running"}
+
+    async def containers():
+        return [helper]
+
+    monkeypatch.setattr(manager.client, "async_containers", containers)
+    assert await manager.async_check_self_update_at_start()
+
+    result = tmp_path / "config" / _selfupdate.RESULT_FILE
+    result.parent.mkdir(parents=True)
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:  # the helper writes its outcome in the meantime
+            result.write_text(json.dumps({"app": "ha", "status": "failed"}))
+
+    monkeypatch.setattr(apps_module, "asyncio", SimpleNamespace(sleep=sleep))
+    await manager.async_watch_self_update()
+    assert len(waits) == 2 and not result.exists()
+    assert manager.notes  # the outcome is shown
+
+
+async def test__setup_has_nothing_to_watch_without_a_helper(manager):
+    assert not await manager.async_check_self_update_at_start()

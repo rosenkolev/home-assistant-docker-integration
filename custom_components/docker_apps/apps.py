@@ -526,6 +526,7 @@ class AppManager:
                     settings.store = entry["store"]
                 settings.history.remove(entry)
                 await self.async_save()
+                await self._async_remove_backup(entry)
         persistent_notification.async_create(
             self.hass,
             self_update_message(result),
@@ -535,33 +536,30 @@ class AppManager:
         _LOGGER.error("Home Assistant update: %s", result)
         return True
 
-    async def async_check_self_update_at_start(self) -> None:
-        """The outcome of an update of this container, also when the helper is
-        still watching the new one (it writes the outcome after that)."""
+    async def async_check_self_update_at_start(self) -> bool:
+        """The outcome of an update of this container. True when the helper is
+        still watching the new one (it writes the outcome after that): then
+        `async_watch_self_update` waits for it."""
         if await self.async_check_self_update():
-            return
+            return False
         try:
             containers = await self.client.async_containers()
         except DockerError:
-            return
-        if any(
+            return False
+        return any(
             (c.get("Labels") or {}).get(LABEL_HELPER) and c.get("State") == "running"
             for c in containers
-        ):
-            self._watch_self_update()
+        )
 
-    def _watch_self_update(self) -> None:
+    async def async_watch_self_update(self) -> None:
         """Wait for the helper's outcome. A new container that comes up restarts
         Home Assistant, which reads it at setup; one that doesn't come up never
-        stops this one."""
-
-        async def watch() -> None:
-            for _ in range(SELF_UPDATE_WATCH // 10):
-                await asyncio.sleep(10)
-                if await self.async_check_self_update():
-                    return
-
-        self.hass.async_create_background_task(watch(), f"{DOMAIN} self-update")
+        stops this one. Runs as a task of the config entry: a reload stops it, and
+        the new setup watches again."""
+        for _ in range(SELF_UPDATE_WATCH // 10):
+            await asyncio.sleep(10)
+            if await self.async_check_self_update():
+                return
 
     async def async_save(self) -> None:
         await self._store.async_save(
@@ -1193,6 +1191,13 @@ class AppManager:
         # user can try again from the update entity
         settings.history = [h for h in settings.history if h is not entry]
         await self.async_save()
+        await self._async_remove_backup(entry)
+
+    async def _async_remove_backup(self, entry: dict) -> None:
+        """The folder of a backup that is out of the history: its files are in use
+        again, and nothing points to it any more."""
+        if local := self.paths.to_local(entry["dir"]):
+            await self.hass.async_add_executor_job(remove_tree, local)
 
     async def _async_undo_update(
         self, app: AppInfo, entry: dict, data: DockerData, err: Exception

@@ -282,3 +282,58 @@ async def test__a_pull_without_progress_stops(monkeypatch):
 async def test__a_slow_but_steady_pull_goes_on(monkeypatch):
     # longer than the stall time in all, but never silent that long
     assert len(await pull(monkeypatch, [0.1] * 6)) == 6
+
+
+class FakeLogs(FakePull):
+    """A followed log response: chunks of bytes."""
+
+    def __init__(self, chunks: list[bytes]):
+        self.data = b"".join(chunks)
+        self.chunks = chunks
+
+    @property
+    def content(self):
+        logs = self
+
+        class Content:
+            async def iter_any(self):
+                for chunk in logs.chunks:
+                    yield chunk
+
+            async def readexactly(self, size):
+                if len(logs.data) < size:
+                    raise asyncio.IncompleteReadError(logs.data, size)
+                part, logs.data = logs.data[:size], logs.data[size:]
+                return part
+
+        return Content()
+
+
+async def follow(monkeypatch, chunks, tty):
+    client = DockerClient("unix:///var/run/docker.sock")
+
+    async def request(*args, **kwargs):
+        return FakeLogs(chunks)
+
+    monkeypatch.setattr(client, "_request", request)
+    return [line async for line in client.async_container_logs_follow("a", tty=tty)]
+
+
+def frame(text: bytes) -> bytes:
+    return b"\x01\x00\x00\x00" + struct.pack(">I", len(text)) + text
+
+
+async def test__followed_logs_are_split_into_lines(monkeypatch):
+    chunks = [frame(b"one\ntw"), frame(b"o\nthree")]
+    assert await follow(monkeypatch, chunks, False) == ["one", "two", "three"]
+    # a character split between two reads stays whole
+    chunks = ["hé\n".encode()[:2], "hé\n".encode()[2:] + b"x"]
+    assert await follow(monkeypatch, chunks, True) == ["hé", "x"]
+
+
+async def test__followed_logs_without_line_breaks_are_not_kept_growing(monkeypatch):
+    monkeypatch.setattr(docker_client_module, "MAX_LOG_LINE", 10)
+    chunks = [frame(b"#" * 8 + b"\r") for _ in range(4)]
+    lines = await follow(monkeypatch, chunks, False)
+    assert all(len(line) <= 18 for line in lines)
+    assert "".join(lines) == ("#" * 8 + "\r") * 4
