@@ -5,6 +5,8 @@ and writes those files through its own bind mounts, found by inspecting its own
 container. Outside a container, paths are used as they are.
 """
 
+# cspell:words RDONLY
+
 from __future__ import annotations
 
 import contextlib
@@ -57,13 +59,30 @@ def read_text(path: str) -> str | None:
 
 
 def write_text(path: str, content: str, private: bool = False) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Replace a file atomically; on disk before it counts, so a power cut leaves
+    the old content or the new one, never an empty file."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
     tmp = f"{path}.docker-apps.tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as file:
         file.write(content)
+        file.flush()
+        os.fsync(file.fileno())
     if private:
         os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    sync_folder(folder)
+
+
+def sync_folder(folder: str) -> None:
+    """Put a rename in the folder on disk (Linux; Windows can't open folders)."""
+    if os.name == "nt":
+        return
+    fd = os.open(folder or ".", os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def copy_file(source: str, target: str) -> bool:
