@@ -455,3 +455,70 @@ def test__compose_anchors_still_work():
         "  a:\n    <<: *common\n    image: a\n  b:\n    <<: *common\n    image: b\n"
     )
     assert data["services"]["b"] == {"restart": "always", "image": "b"}
+
+
+def test__one_broken_app_leaves_the_rest_of_the_store():
+    casaos = _tar(
+        {
+            "store-main/Apps/Jellyfin/docker-compose.yml": CASAOS,
+            "store-main/Apps/Broken/docker-compose.yml": "x-casaos: text\nservices: {}\n",
+            "store-main/Apps/List/docker-compose.yml": "- a\n- b\n",
+            "store-main/Apps/Odd/docker-compose.yml": (
+                "services:\n  a: [1]\nx-casaos: {title: 5, category: [x]}\n"
+            ),
+        }
+    )
+    assert "Jellyfin" in [a.name for a in parse_archive(casaos, KIND_CASAOS, "r")]
+    tipi = _tar(
+        {
+            "appstore-master/apps/good/config.json": TIPI_CONFIG,
+            "appstore-master/apps/good/docker-compose.yml": TIPI_COMPOSE,
+            "appstore-master/apps/bad/config.json": "[1, 2]",
+            "appstore-master/apps/bad/docker-compose.yml": TIPI_COMPOSE,
+            "appstore-master/apps/worse/config.json": '{"id": "worse", "form_fields": 5}',
+            "appstore-master/apps/worse/docker-compose.yml": "[1]",
+        }
+    )
+    assert [a.app_id for a in parse_archive(tipi, KIND_RUNTIPI, "r")] == ["immich"]
+
+
+def test__store_links_and_web_path_stay_on_the_web():
+    compose = yaml.safe_load(CASAOS)
+    compose["x-casaos"] |= {
+        "website": "javascript:alert(document.cookie)",
+        "repo": " JAVASCRIPT:alert(1)",
+        "icon": "data:image/svg+xml,<svg onload=alert(1)>",
+        "index": "@evil.example/",
+    }
+    app = parse_casaos_compose(yaml.safe_dump(compose), "r")
+    assert (app.website, app.source, app.icon) == (None, None, None)
+    assert app.web_path == "/"
+    compose["x-casaos"] |= {
+        "website": "https://jellyfin.org",
+        "index": "//evil.example",
+    }
+    app = parse_casaos_compose(yaml.safe_dump(compose), "r")
+    assert app.website == "https://jellyfin.org"
+    assert app.web_path == "/"
+
+
+def test__store_fields_are_cleaned_to_their_type():
+    config = json.loads(TIPI_CONFIG) | {
+        "name": 123,
+        "categories": "media",
+        "port": "abc",
+        "website": ["https://x"],
+        "form_fields": [
+            {"env_variable": "GOOD", "type": "evil", "min": "x", "label": ["l"]},
+            {"env_variable": "A\nB=injected", "type": "text"},
+            {"env_variable": 5},
+            "not a field",
+        ],
+    }
+    app = parse_runtipi(json.dumps(config), TIPI_COMPOSE, None, "tipi")
+    assert app.name == "123"
+    assert app.categories == ["media"]
+    assert app.web_port is None and app.website is None
+    assert [(v.key, v.type, v.min, v.label) for v in app.variables] == [
+        ("GOOD", "text", None, "GOOD")
+    ]

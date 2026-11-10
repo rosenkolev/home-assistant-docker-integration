@@ -4,6 +4,8 @@ Every source is turned into the same normalized `StoreApp`. Rendering an app giv
 plain compose file plus a `.env`, so installed apps are ordinary compose projects.
 """
 
+# cspell:words fqdnip
+
 # cspell:words armhf armv Baïkal dbgate dotenv Selkies sysctls ulimits
 
 from __future__ import annotations
@@ -20,11 +22,14 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
+import logging
+
 import yaml
 
 from ._models import split_image
 from ._yaml import safe_load
 
+_LOGGER = logging.getLogger(__name__)
 KIND_CASAOS = "casaos"
 KIND_RUNTIPI = "runtipi"
 KINDS = (KIND_CASAOS, KIND_RUNTIPI)
@@ -148,13 +153,57 @@ def archive_urls(url: str, kind: str) -> list[str]:
 
 def _localized(value, locale: str = "en_US") -> str:
     if isinstance(value, dict):
-        return (
+        value = (
             value.get(locale)
             or value.get("en_US")
             or value.get("en_GB")
             or next(iter(value.values()), "")
         )
-    return value or ""
+    return _text(value)
+
+
+# --- store fields: cleaned to their type, a store can hold anything ---
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+FIELD_TYPES = {
+    "text", "password", "email", "number", "fqdn", "ip", "fqdnip", "url",
+    "random", "boolean",
+}  # fmt: skip
+
+
+def _text(value) -> str:
+    """Text, from a number too; anything else (a list, an object) is no text."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    return str(value)
+
+
+def _texts(value) -> list[str]:
+    """A list of texts; one text is a list of one."""
+    items = value if isinstance(value, list) else [value]
+    return [text for text in map(_text, items) if text]
+
+
+def _link(value) -> str | None:
+    """Only web links: `javascript:` and the like would run in Home Assistant."""
+    text = _text(value).strip()
+    return text if text.lower().startswith(("http://", "https://")) else None
+
+
+def _web_path(value) -> str:
+    """A path on the app's own address: `@evil.example/` would lead elsewhere."""
+    text = _text(value).strip()
+    return text if text.startswith("/") and not text.startswith("//") else "/"
+
+
+def _port(value) -> int | None:
+    text = _text(value).strip()
+    return int(text) if text.isdigit() and 0 < int(text) < 65536 else None
+
+
+def _int(value) -> int | None:
+    text = _text(value).strip()
+    return int(text) if text.lstrip("-").isdigit() else None
 
 
 def _hash(*parts: str) -> str:
@@ -203,22 +252,23 @@ def web_endpoint(
 
 def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
     data = safe_load(text) or {}
-    meta = data.get("x-casaos") or {}
-    if not meta or not data.get("services"):
+    meta = data.get("x-casaos") if isinstance(data, dict) else None
+    services = data.get("services") if isinstance(data, dict) else None
+    if not isinstance(meta, dict) or not meta or not isinstance(services, dict):
+        return None
+    if not services:
         return None
     app_id = safe_id(
-        str(meta.get("id") or data.get("name") or next(iter(data["services"])))
+        _text(meta.get("id")) or _text(data.get("name")) or str(next(iter(services)))
     )
-    port = str(meta.get("port_map") or "").strip()
+    port = _text(meta.get("port_map")).strip()
+    main_name = _text(meta.get("main")) or None
     # some stores (BigBear) have no version: show the main image tag instead
-    main = (
-        data["services"].get(meta.get("main")) or next(iter(data["services"].values()))
-    ) or {}
-    version = str(
-        meta.get("version") or split_image(str(main.get("image", "")))[1] or ""
-    )
+    main = services.get(main_name) or next(iter(services.values()))
+    main = main if isinstance(main, dict) else {}
+    version = _text(meta.get("version")) or split_image(_text(main.get("image")))[1]
     web_port, web_target, web_scheme = web_endpoint(
-        main, port, str(meta.get("scheme") or "").lower()
+        main, port, _text(meta.get("scheme")).lower()
     )
     return StoreApp(
         id=f"{repo_id}.{app_id}",
@@ -226,20 +276,20 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
         app_id=app_id,
         kind=KIND_CASAOS,
         name=_localized(meta.get("title")) or app_id,
-        version=version,
-        package_version=str(meta.get("version") or _hash(text)),
+        version=version or "",
+        package_version=_text(meta.get("version")) or _hash(text),
         tagline=_localized(meta.get("tagline")),
         description=_localized(meta.get("description")),
-        icon=meta.get("icon"),
-        categories=[meta["category"]] if meta.get("category") else [],
-        architectures=list(meta.get("architectures") or []),
-        website=meta.get("website"),
-        source=meta.get("repo"),
+        icon=_link(meta.get("icon")),
+        categories=_texts(meta.get("category")),
+        architectures=_texts(meta.get("architectures")),
+        website=_link(meta.get("website")),
+        source=_link(meta.get("repo")),
         release_notes=_localized(meta.get("release_notes")) or None,
         content_hash=_hash(text),
-        main_service=meta.get("main"),
+        main_service=main_name,
         web_port=web_port,
-        web_path=str(meta.get("index") or "/"),
+        web_path=_web_path(meta.get("index")),
         web_target=web_target,
         web_scheme=web_scheme,
         compose=text,
@@ -273,9 +323,13 @@ def parse_runtipi(
     description: str = "",
 ) -> StoreApp | None:
     config = json.loads(config_text)
+    if not isinstance(config, dict):
+        return None
     if not config.get("available", True) or config.get("deprecated"):
         return None
-    app_id = safe_id(str(config["id"]))
+    app_id = safe_id(_text(config.get("id")))
+    if not _text(config.get("id")):
+        return None
     # Runtipi uses one file: docker-compose.yml in its new format (with x-runtipi),
     # else docker-compose.json. An old docker-compose.yml next to the json is kept
     # for old Runtipi versions only and is often out of date.
@@ -292,19 +346,25 @@ def parse_runtipi(
         return None
     compose = _publish_main_port(compose)
 
+    fields = config.get("form_fields")
     variables = [
         StoreVariable(
             key=field_["env_variable"],
-            label=field_.get("label") or field_["env_variable"],
-            type=field_.get("type", "text"),
+            label=_text(field_.get("label")) or field_["env_variable"],
+            type=(field_.get("type") if field_.get("type") in FIELD_TYPES else "text"),
             default=(
-                str(field_["default"]) if field_.get("default") is not None else None
+                str(field_["default"])
+                if isinstance(field_.get("default"), (str, int, float))
+                else None
             ),
             required=bool(field_.get("required")),
-            min=field_.get("min"),
+            min=_int(field_.get("min")),
         )
-        for field_ in config.get("form_fields") or []
-        if field_.get("env_variable")
+        for field_ in (fields if isinstance(fields, list) else [])
+        # the name goes into .env: anything else could add lines to it
+        if isinstance(field_, dict)
+        and isinstance(field_.get("env_variable"), str)
+        and _ENV_NAME.fullmatch(field_["env_variable"])
     ]
 
     services = (safe_load(compose) or {}).get("services") or {}
@@ -322,17 +382,17 @@ def parse_runtipi(
         repo_id=repo_id,
         app_id=app_id,
         kind=KIND_RUNTIPI,
-        name=config.get("name") or app_id,
-        version=str(config.get("version") or ""),
-        package_version=str(config.get("tipi_version") or "0"),
-        tagline=config.get("short_desc") or "",
-        description=description or config.get("description") or "",
-        categories=list(config.get("categories") or []),
-        architectures=list(config.get("supported_architectures") or []),
-        website=config.get("website"),
-        source=config.get("source"),
+        name=_text(config.get("name")) or app_id,
+        version=_text(config.get("version")),
+        package_version=_text(config.get("tipi_version")) or "0",
+        tagline=_text(config.get("short_desc")),
+        description=description or _text(config.get("description")),
+        categories=_texts(config.get("categories")),
+        architectures=_texts(config.get("supported_architectures")),
+        website=_link(config.get("website")),
+        source=_link(config.get("source")),
         content_hash=_hash(config_text, compose),
-        web_port=config.get("port") if web_target != 3001 else web_port,
+        web_port=_port(config.get("port")) if web_target != 3001 else web_port,
         web_target=web_target,
         web_scheme=web_scheme,
         variables=variables,
@@ -659,7 +719,9 @@ def parse_archive(
             if path.rsplit("/", 1)[-1] in ("docker-compose.yml", "docker-compose.yaml"):
                 try:
                     app = parse_casaos_compose(content, repo_id)
-                except yaml.YAMLError:
+                except Exception as err:  # noqa: BLE001
+                    # one broken app is left out, the rest of the store loads
+                    _LOGGER.debug("App %s left out: %s", path, err)
                     continue
                 if app:
                     apps.append(app)
@@ -676,7 +738,8 @@ def parse_archive(
                 repo_id,
                 description=files.get(f"{folder}/metadata/description.md", ""),
             )
-        except (ValueError, KeyError, yaml.YAMLError):
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("App %s left out: %s", folder, err)
             continue
         if app:
             data = f"{folder}/data/"
