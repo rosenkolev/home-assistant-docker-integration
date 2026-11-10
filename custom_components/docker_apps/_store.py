@@ -720,7 +720,7 @@ def published_ports(compose_text: str) -> set[int]:
 
 
 def parse_archive(
-    raw: bytes, kind: str, repo_id: str, raw_url: str | None = None
+    raw: bytes | bytearray, kind: str, repo_id: str, raw_url: str | None = None
 ) -> list[StoreApp]:
     """Read a repository archive (tar.gz or zip) and return its apps.
 
@@ -786,7 +786,7 @@ class ArchiveTooBig(ValueError):
     """A repository archive beyond the limits: refused, not read on."""
 
 
-def _read_archive(raw: bytes, kind: str) -> dict[str, str]:
+def _read_archive(raw: bytes | bytearray, kind: str) -> dict[str, str]:
     files: dict[str, str] = {}
     kept = 0  # bytes of text kept
 

@@ -73,7 +73,7 @@ async def async_fetch_repository(
     try:
         apps = await hass.async_add_executor_job(
             parse_archive,
-            bytes(raw),
+            raw,  # read as it is: a bytes() copy would double the memory
             repository.kind,
             repository.id,
             raw_file_url(repository.url),

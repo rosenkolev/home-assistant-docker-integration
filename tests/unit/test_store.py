@@ -540,3 +540,15 @@ def test__env_values_round_trip_through_the_env_file():
         "J": r"quote' and \ and $HOME",
     }
     assert parse_env_file(format_env(env)) == env
+
+
+def test__parse_archive_reads_a_bytearray_as_downloaded():
+    tipi = bytearray(
+        _tar(
+            {
+                "appstore-master/apps/immich/config.json": TIPI_CONFIG,
+                "appstore-master/apps/immich/docker-compose.yml": TIPI_COMPOSE,
+            }
+        )
+    )
+    assert [a.app_id for a in parse_archive(tipi, KIND_RUNTIPI, "r")] == ["immich"]
