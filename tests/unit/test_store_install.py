@@ -7,6 +7,7 @@ import pytest
 
 from custom_components.docker_apps import apps as apps_module
 from custom_components.docker_apps._docker_client import DockerError
+from custom_components.docker_apps._paths import remove_tree
 from custom_components.docker_apps._store import parse_runtipi
 from custom_components.docker_apps.apps import AppError, AppManager, host_ports_in_use
 from tests.fake_docker import FakeDocker, FakeRegistry
@@ -181,6 +182,45 @@ async def test__app_removed_outside_is_installed_again_with_its_secrets(
     assert manager.client.containers
     assert secret(tmp_path) == before
     assert manager.get("whoami").store["web_port"] == "8123"
+
+
+async def removed_outside_with_history(manager):
+    data = await manager.client.async_fetch()
+    await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
+    data = await manager.client.async_fetch()
+    new = store_app("1.11.0", 4)
+    update = (await manager.async_check_updates(data, {new.id: new}))["whoami"]
+    await manager.async_update(data.apps["whoami"], update, data)
+    manager.client.containers.clear()
+    assert manager.history_versions("whoami") == ["1.10.0"]
+    return await manager.client.async_fetch()
+
+
+async def test__failed_reinstall_keeps_the_settings_of_the_app(manager):
+    data = await removed_outside_with_history(manager)
+    manager.client.add_container(
+        "other", "nginx", ports=[{"PrivatePort": 80, "PublicPort": 8099, "Type": "tcp"}]
+    )
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match="8099"):
+        await manager.async_install_store_app(store_app("1.11.0", 4), data=data)
+    assert manager.history_versions("whoami") == ["1.10.0"]
+    assert manager.get("whoami").store["version"] == "1.11.0"
+
+
+async def test__reinstall_into_the_earlier_folder_keeps_the_history(manager):
+    data = await removed_outside_with_history(manager)
+    await manager.async_install_store_app(store_app("1.11.0", 4), data=data)
+    assert manager.history_versions("whoami") == ["1.10.0"]
+
+
+async def test__install_into_a_new_folder_drops_the_old_history(manager, tmp_path):
+    data = await removed_outside_with_history(manager)
+    remove_tree((tmp_path / "apps" / "whoami").as_posix())
+    await manager.async_install_store_app(
+        store_app("1.11.0", 4), data=data, use_existing_data=True
+    )
+    assert manager.history_versions("whoami") == []
 
 
 async def test__reinstall_dialog_gets_the_earlier_answers_but_no_secrets(manager):

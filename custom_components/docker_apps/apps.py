@@ -1405,9 +1405,9 @@ class AppManager:
                     raise AppError(f"{store_app.name} is already installed as {other}")
                 if app_key in data.apps if data else installed:
                     raise AppError(f"an app named {app_key} already exists")
-                # settings of an app whose containers were removed outside are stale
+                # settings of an app whose containers were removed outside are
+                # stale; they are replaced only once the install worked
                 installed = None
-                self.settings.pop(app_key, None)
                 earlier = await self._check_folder(
                     store_app, app_key, use_existing_data
                 )
@@ -1478,6 +1478,13 @@ class AppManager:
             finally:
                 self.installing.pop(app_key, None)
 
+            if not is_update:
+                # the backups of an earlier install stay when its folder was used
+                # again; with a new folder they point to files that are gone
+                stale = self.settings.pop(app_key, None)
+                self.settings[app_key] = AppSettings(
+                    history=stale.history if stale and earlier is not None else []
+                )
             settings = self.settings.setdefault(app_key, AppSettings())
             settings.managed = True
             settings.store = {
