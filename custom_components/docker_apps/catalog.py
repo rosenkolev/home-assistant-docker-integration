@@ -21,7 +21,7 @@ from .const import _LOGGER, DOMAIN
 
 STORAGE_VERSION = 1
 # bump when parsing changes, so cached catalogs are downloaded again
-CATALOG_FORMAT = 4
+CATALOG_FORMAT = 5
 MAX_ARCHIVE = 200 * 1024 * 1024
 TIMEOUT = aiohttp.ClientTimeout(total=300)
 

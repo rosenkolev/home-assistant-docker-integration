@@ -4,7 +4,7 @@ Every source is turned into the same normalized `StoreApp`. Rendering an app giv
 plain compose file plus a `.env`, so installed apps are ordinary compose projects.
 """
 
-# cspell:words armhf armv Baïkal dbgate dotenv Selkies
+# cspell:words armhf armv Baïkal dbgate dotenv Selkies sysctls ulimits
 
 from __future__ import annotations
 
@@ -275,13 +275,18 @@ def parse_runtipi(
     if not config.get("available", True) or config.get("deprecated"):
         return None
     app_id = safe_id(str(config["id"]))
-    compose = compose_text or (
-        yaml.safe_dump(
-            runtipi_dynamic_to_compose(json.loads(dynamic_text)), sort_keys=False
+    # Runtipi uses one file: docker-compose.yml in its new format (with x-runtipi),
+    # else docker-compose.json. An old docker-compose.yml next to the json is kept
+    # for old Runtipi versions only and is often out of date.
+    yml = (yaml.safe_load(compose_text) if compose_text else None) or {}
+    if dynamic_text and not (isinstance(yml, dict) and "x-runtipi" in yml):
+        compose = yaml.safe_dump(
+            runtipi_dynamic_to_compose(json.loads(dynamic_text)),
+            sort_keys=False,
+            allow_unicode=True,
         )
-        if dynamic_text
-        else None
-    )
+    else:
+        compose = compose_text
     if compose is None:
         return None
     compose = _publish_main_port(compose)
@@ -352,54 +357,99 @@ def _publish_main_port(compose: str) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+# keys of a Runtipi docker-compose.json service that are compose keys as they are,
+# or under another name
+_DYNAMIC_SAME = (
+    "image", "command", "entrypoint", "user", "hostname", "tty", "privileged",
+    "devices", "pid", "ulimits", "sysctls", "logging", "dns", "restart",
+)  # fmt: skip
+_DYNAMIC_RENAMED = {
+    "networkMode": "network_mode",
+    "extraHosts": "extra_hosts",
+    "workingDir": "working_dir",
+    "shmSize": "shm_size",
+    "stdinOpen": "stdin_open",
+    "extraLabels": "labels",
+    "capAdd": "cap_add",
+    "capDrop": "cap_drop",
+    "securityOpt": "security_opt",
+    "readOnly": "read_only",
+    "stopSignal": "stop_signal",
+    "stopGracePeriod": "stop_grace_period",
+    "dependsOn": "depends_on",
+}
+
+
 def runtipi_dynamic_to_compose(data: dict) -> dict:
-    """Convert a Runtipi dynamic compose (schema v2) to a compose file."""
+    """A Runtipi docker-compose.json as a compose file, the way Runtipi converts it
+    (convertLegacyToYaml). The web port is published from x-runtipi afterwards."""
     services = {}
     for item in data.get("services") or []:
-        service: dict = {"image": item["image"], "restart": "unless-stopped"}
-        if item.get("command"):
-            service["command"] = item["command"]
-        if env := item.get("environment"):
-            service["environment"] = (
-                {e["key"]: e["value"] for e in env} if isinstance(env, list) else env
-            )
-        if volumes := item.get("volumes"):
-            service["volumes"] = [
-                f"{v['hostPath']}:{v['containerPath']}"
-                + (":ro" if v.get("readOnly") else "")
-                for v in volumes
-            ]
-        ports = []
-        if item.get("isMain") and item.get("internalPort"):
-            ports.append(f"${{APP_PORT}}:{item['internalPort']}")
-        for port in item.get("addPorts") or []:
-            ports.append(
-                f"{port['hostPort']}:{port['containerPort']}"
-                + ("/udp" if port.get("udp") else "")
-            )
-        if ports:
+        service: dict = {"restart": "unless-stopped"}
+        for key, value in item.items():
+            if key in _DYNAMIC_SAME or key in _DYNAMIC_RENAMED:
+                service[_DYNAMIC_RENAMED.get(key, key)] = value
+        if ports := [p for port in item.get("addPorts") or [] for p in _ports(port)]:
             service["ports"] = ports
-        if depends := item.get("dependsOn"):
-            service["depends_on"] = depends
-        for source, target in (
-            ("networkMode", "network_mode"),
-            ("privileged", "privileged"),
-            ("devices", "devices"),
-            ("capAdd", "cap_add"),
-            ("user", "user"),
-            ("entrypoint", "entrypoint"),
-            ("workingDir", "working_dir"),
-            ("shmSize", "shm_size"),
-        ):
-            if item.get(source) is not None:
-                service[target] = item[source]
-        if health := item.get("healthCheck"):
-            service["healthcheck"] = {
-                key.replace("startPeriod", "start_period"): value
-                for key, value in health.items()
+        if env := item.get("environment"):
+            pairs = (
+                [(e["key"], e["value"]) for e in env]
+                if isinstance(env, list)
+                else env.items()
+            )
+            # compose takes no booleans: Runtipi writes them as text
+            service["environment"] = {
+                k: str(v).lower() if isinstance(v, bool) else v for k, v in pairs
             }
+        if volumes := item.get("volumes"):
+            service["volumes"] = [_volume(v) for v in volumes]
+        for key, target in (("healthCheck", "healthcheck"), ("deploy", "deploy")):
+            if item.get(key):
+                service[target] = _snake_keys(item[key])
+        meta = {
+            "is_main": item.get("isMain"),
+            "internal_port": item.get("internalPort"),
+        }
+        if meta := {k: v for k, v in meta.items() if v is not None}:
+            service["x-runtipi"] = meta
         services[item["name"]] = service
     return {"services": services}
+
+
+def _ports(port: dict) -> list[str]:
+    """`addPorts` entry: one mapping per protocol, none means both."""
+    mapping = f"{port['hostPort']}:{port['containerPort']}"
+    if port.get("interface"):
+        mapping = f"{port['interface']}:{mapping}"
+    protocols = [p for p in ("tcp", "udp") if port.get(p)]
+    return [f"{mapping}/{p}" for p in protocols] or [mapping]
+
+
+def _volume(volume: dict) -> str:
+    options = [
+        option
+        for option, on in (
+            ("ro", volume.get("readOnly")),
+            ("z", volume.get("shared")),
+            ("Z", volume.get("private") and not volume.get("shared")),
+            ((volume.get("bind") or {}).get("propagation"), True),
+        )
+        if on and option
+    ]
+    mapping = f"{volume['hostPath']}:{volume['containerPath']}"
+    return f"{mapping}:{','.join(options)}" if options else mapping
+
+
+def _snake_keys(value):
+    """startPeriod is start_period, deviceIds is device_ids, at every level."""
+    if isinstance(value, dict):
+        return {
+            re.sub(r"(?<!^)([A-Z])", r"_\1", k).lower(): _snake_keys(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_snake_keys(v) for v in value]
+    return value
 
 
 def render_runtipi(app: StoreApp, project: str) -> dict:

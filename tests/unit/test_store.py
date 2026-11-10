@@ -185,30 +185,71 @@ def test__render_keeps_stored_secrets():
     assert env["DB_PASSWORD"] == "kept"
 
 
-def test__runtipi_dynamic_compose():
-    data = runtipi_dynamic_to_compose(
+DYNAMIC = {
+    "schemaVersion": 2,
+    "services": [
         {
-            "services": [
-                {
-                    "name": "jellyfin",
-                    "image": "lscr.io/linuxserver/jellyfin:1",
-                    "isMain": True,
-                    "internalPort": 8096,
-                    "environment": [{"key": "TZ", "value": "${TZ}"}],
-                    "volumes": [
-                        {
-                            "hostPath": "${APP_DATA_DIR}/config",
-                            "containerPath": "/config",
-                        }
-                    ],
+            "name": "jellyfin",
+            "image": "lscr.io/linuxserver/jellyfin:1",
+            "isMain": True,
+            "internalPort": 8096,
+            "environment": [
+                {"key": "TZ", "value": "${TZ}"},
+                {"key": "DEBUG", "value": False},
+            ],
+            "volumes": [
+                {"hostPath": "${APP_DATA_DIR}/config", "containerPath": "/config"},
+                {"hostPath": "/media", "containerPath": "/media", "readOnly": True},
+            ],
+            "addPorts": [
+                {"hostPort": 7359, "containerPort": 7359, "udp": True},
+                {"hostPort": 1900, "containerPort": 1900, "tcp": True, "udp": True},
+            ],
+            "extraLabels": {"a": "b"},
+            "stopGracePeriod": "30s",
+            "healthCheck": {"test": "curl -f localhost", "startPeriod": "10s"},
+            "deploy": {
+                "resources": {
+                    "reservations": {
+                        "devices": [{"capabilities": ["gpu"], "deviceIds": ["0"]}]
+                    }
                 }
-            ]
+            },
         }
-    )
-    service = data["services"]["jellyfin"]
-    assert service["ports"] == ["${APP_PORT}:8096"]
-    assert service["environment"] == {"TZ": "${TZ}"}
-    assert service["volumes"] == ["${APP_DATA_DIR}/config:/config"]
+    ],
+}
+
+
+def test__runtipi_dynamic_compose():
+    service = runtipi_dynamic_to_compose(DYNAMIC)["services"]["jellyfin"]
+    assert service["image"] == "lscr.io/linuxserver/jellyfin:1"
+    assert service["restart"] == "unless-stopped"
+    assert service["environment"] == {"TZ": "${TZ}", "DEBUG": "false"}
+    assert service["volumes"] == ["${APP_DATA_DIR}/config:/config", "/media:/media:ro"]
+    assert service["ports"] == ["7359:7359/udp", "1900:1900/tcp", "1900:1900/udp"]
+    assert service["labels"] == {"a": "b"}
+    assert service["stop_grace_period"] == "30s"
+    assert service["healthcheck"] == {
+        "test": "curl -f localhost",
+        "start_period": "10s",
+    }
+    device = service["deploy"]["resources"]["reservations"]["devices"][0]
+    assert device["device_ids"] == ["0"]
+    assert service["x-runtipi"] == {"is_main": True, "internal_port": 8096}
+
+
+def test__runtipi_uses_the_json_unless_the_yml_is_the_new_format():
+    old_yml = "services:\n  jellyfin:\n    image: lscr.io/linuxserver/jellyfin:0\n"
+    app = parse_runtipi(TIPI_CONFIG, old_yml, json.dumps(DYNAMIC), "tipi")
+    service = yaml.safe_load(app.compose)["services"]["jellyfin"]
+    assert service["image"] == "lscr.io/linuxserver/jellyfin:1"
+    assert service["ports"][0] == "${APP_PORT}:8096"  # the web port, published
+    assert app.web_target == 8096
+
+    new_yml = "x-runtipi:\n  schema_version: 2\n" + old_yml
+    app = parse_runtipi(TIPI_CONFIG, new_yml, json.dumps(DYNAMIC), "tipi")
+    image = yaml.safe_load(app.compose)["services"]["jellyfin"]["image"]
+    assert image == "lscr.io/linuxserver/jellyfin:0"
 
 
 def _tar(files: dict[str, str | bytes]) -> bytes:

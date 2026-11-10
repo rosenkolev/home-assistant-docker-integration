@@ -163,7 +163,7 @@ tunnel)
     grep -o '"IPAddress":"[0-9.]*"' | head -1 | cut -d'"' -f4)
   ports=${*:2}
   [[ -n $ports ]] || ports=$(remote "\$D exec docker-apps-sandbox docker ps --format '{{.Ports}}'" |
-    grep -o '0\.0\.0\.0:[0-9]*' | cut -d: -f2 | sort -un | tr '\n' ' ')
+    { grep -o '0\.0\.0\.0:[0-9]*' || true; } | cut -d: -f2 | sort -un | tr '\n' ' ')
   forwards=(-L "$PORT:127.0.0.1:$PORT")
   for p in $ports; do forwards+=(-L "$p:$ip:$p"); done
   echo "forwarding $CLIENT and app ports: ${ports:-none}"

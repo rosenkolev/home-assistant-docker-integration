@@ -47,6 +47,18 @@ class DockerError(Exception):
         self.message = message
 
 
+def pull_error(image: str, err: DockerError) -> DockerError:
+    """A pull error in words: Docker says `manifest unknown` for a tag that
+    doesn't exist, often a store app pointing at a tag that was never published."""
+    if "manifest unknown" in err.message or "repository does not exist" in err.message:
+        return DockerError(
+            err.status,
+            f"The image {image} does not exist in its registry. "
+            "Its tag or name is wrong in the app's compose file.",
+        )
+    return err
+
+
 class DockerConnectionError(DockerError):
     """Docker engine is not reachable."""
 
@@ -283,19 +295,22 @@ class DockerClient:
     async def async_image_pull(self, image: str) -> AsyncIterator[dict]:
         """Pull an image and yield progress messages."""
         repository, tag, digest = split_image(image)
-        response = await self._request(
-            "POST",
-            "/images/create",
-            params={"fromImage": repository, "tag": digest or tag or "latest"},
-            timeout=STREAM_TIMEOUT,
-        )
+        try:
+            response = await self._request(
+                "POST",
+                "/images/create",
+                params={"fromImage": repository, "tag": digest or tag or "latest"},
+                timeout=STREAM_TIMEOUT,
+            )
+        except DockerError as err:
+            raise pull_error(image, err) from err
         async with response:
             async for line in response.content:
                 line = line.strip()
                 if line:
                     message = json.loads(line)
                     if "error" in message:
-                        raise DockerError(500, message["error"])
+                        raise pull_error(image, DockerError(500, message["error"]))
                     yield message
 
     # --- prune ---

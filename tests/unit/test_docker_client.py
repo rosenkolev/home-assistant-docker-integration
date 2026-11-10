@@ -1,4 +1,4 @@
-# cspell:words pgvectors pihole
+# cspell:words niruix pgvectors pihole sshwifty
 
 import struct
 
@@ -7,6 +7,7 @@ import pytest
 from custom_components.docker_apps._docker_client import (
     DockerClient,
     DockerConnectionError,
+    DockerError,
     _clean_params,
     build_docker_data,
     container_key,
@@ -14,10 +15,23 @@ from custom_components.docker_apps._docker_client import (
     parse_disk_usage,
     parse_stats,
     parse_time,
+    pull_error,
 )
 from custom_components.docker_apps._models import split_image
 from custom_components.docker_apps._paths import PathMap
 from custom_components.docker_apps._registry import parse_reference
+
+
+def test__pull_error_says_the_image_does_not_exist():
+    unknown = DockerError(
+        404,
+        "manifest for niruix/sshwifty:0.4.12 not found: manifest unknown: "
+        "manifest unknown",
+    )
+    err = pull_error("niruix/sshwifty:0.4.12", unknown)
+    assert err.message.startswith("The image niruix/sshwifty:0.4.12 does not exist")
+    other = DockerError(500, "no space left on device")
+    assert pull_error("a:1", other) is other
 
 
 def raw(
