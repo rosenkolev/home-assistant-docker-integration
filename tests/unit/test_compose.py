@@ -211,6 +211,33 @@ def test__start_order_should_put_dependencies_first():
     assert order.index("database") < order.index("immich-server")
 
 
+def test__volumes_from_should_name_containers_and_start_after_them():
+    files = {
+        "/srv/a/compose.yaml": """
+services:
+  app:
+    image: busybox
+    volumes_from: [data, "data2:ro", "container:outside:rw"]
+  data:
+    image: busybox
+  data2:
+    image: busybox
+    container_name: second
+  bad:
+    image: busybox
+    volumes_from: [missing]
+"""
+    }
+    loaded = load_model("a", "/srv/a", files, None)
+    order = start_order(loaded, ["app"])
+    assert order.index("data") < order.index("app")
+    assert order.index("data2") < order.index("app")
+    config = build_container_config(loaded, "app", {"data": "abc"})
+    assert config["HostConfig"]["VolumesFrom"] == ["abc", "second:ro", "outside:rw"]
+    with pytest.raises(ComposeError, match="service 'missing' is not defined"):
+        build_container_config(loaded, "bad")
+
+
 def test__build_container_config_server():
     config = build_container_config(model(), "immich-server")
     host = config["HostConfig"]

@@ -62,3 +62,44 @@ def test__each_kind_of_host_access_is_named():
         "Security profile off (seccomp=unconfined)",
         f"The data of all apps ({DATA})",
     ]
+
+
+def test__secrets_volumes_and_other_containers_are_named():
+    compose = {
+        "name": "demo",
+        "services": {
+            "app": {
+                "image": "demo",
+                "volumes_from": ["db", "homeassistant", "container:other:ro"],
+                "network_mode": "container:vpn",
+                "pid": "container:vpn",
+                "secrets": ["sock"],
+            },
+            "db": {"image": "db", "volumes": ["data:/data"]},
+        },
+        "secrets": {"sock": {"file": "/var/run/docker.sock"}, "own": {"file": "./key"}},
+        "configs": {"shadow": {"file": "/etc/shadow"}},
+        "volumes": {
+            "data": {},
+            "mine": {"name": "demo_mine"},
+            "root": {"driver_opts": {"type": "none", "o": "bind", "device": "/"}},
+            "media": {"driver_opts": {"o": "bind", "device": f"{DATA}/media"}},
+            "share": {"driver_opts": {"type": "nfs", "device": ":/export"}},
+            "other": {"name": "immich_database"},
+            "outside": {"external": True},
+            "plugin": {"driver": "rclone"},
+        },
+    }
+    assert host_access(compose, APP, DATA) == [
+        "Existing volume immich_database",
+        "Existing volume outside",
+        "Full control of Docker (/var/run/docker.sock)",
+        "Host folder /",
+        "Host folder /etc/shadow",
+        "The files of container homeassistant",
+        "The files of container other",
+        "The network of container vpn",
+        "The processes of container vpn",
+        "Volume driver rclone",
+        "Volume share mounts :/export",
+    ]

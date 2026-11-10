@@ -789,7 +789,7 @@ def build_container_config(
         "PidsLimit": service.get("pids_limit") or limits.get("pids"),
         "OomScoreAdj": service.get("oom_score_adj"),
         "DeviceRequests": _device_requests(service, reservations),
-        "VolumesFrom": service.get("volumes_from"),
+        "VolumesFrom": _volumes_from(model, service, containers),
         "DeviceCgroupRules": service.get("device_cgroup_rules"),
         "Runtime": service.get("runtime"),
         "CgroupnsMode": service.get("cgroup"),
@@ -926,6 +926,25 @@ def _file_mounts(model: ComposeModel, service: dict, kind: str) -> list[dict]:
     return mounts
 
 
+def _volumes_from(
+    model: ComposeModel, service: dict, containers: dict[str, str] | None
+) -> list[str] | None:
+    """`volumes_from` names services (`db`, `db:ro`) or containers (`container:x`);
+    Docker wants container names or ids."""
+    result = []
+    for entry in _as_list(service.get("volumes_from") or []):
+        text = str(entry)
+        if text.startswith("container:"):
+            result.append(text.removeprefix("container:"))
+            continue
+        name, _, mode = text.partition(":")
+        if name not in model.services:
+            raise ComposeError(f"volumes_from: service '{name}' is not defined")
+        target = (containers or {}).get(name) or container_name(model, name)
+        result.append(f"{target}:{mode}" if mode else target)
+    return result or None
+
+
 def _micros(value) -> int | None:
     """CPU periods: microseconds, or a duration like `10ms`."""
     if value is None:
@@ -1052,7 +1071,15 @@ def start_order(model: ComposeModel, services: list[str] | None = None) -> list[
         if name in visiting:
             raise ComposeError(f"dependency cycle at service '{name}'")
         visiting.add(name)
-        for dep in depends_on(model.services.get(name, {})):
+        service = model.services.get(name, {})
+        # the containers a service takes files or its network from come first too
+        used = [
+            str(e).split(":")[0] for e in _as_list(service.get("volumes_from") or [])
+        ]
+        mode = str(service.get("network_mode") or "")
+        if mode.startswith("service:"):
+            used.append(mode.split(":", 1)[1])
+        for dep in [*depends_on(service), *used]:
             if dep in model.services:
                 visit(dep)
         visiting.discard(name)

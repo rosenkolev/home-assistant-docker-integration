@@ -33,10 +33,59 @@ def _list(value) -> list:
     return value if isinstance(value, list) else [value]
 
 
+def _host_path(found: set[str], source: str, app_dir: str, data_root: str) -> None:
+    """A host file or folder the app mounts, unless it is its own or harmless."""
+    path = posixpath.normpath(posixpath.join(app_dir, source))
+    if path.endswith("docker.sock"):
+        found.add(f"Full control of Docker ({path})")
+    elif path == posixpath.normpath(data_root):
+        found.add(f"The data of all apps ({path})")
+    elif not (
+        _inside(path, app_dir)
+        or _inside(path, data_root)
+        or any(_inside(path, h) for h in HARMLESS)
+    ):
+        found.add(f"Host folder {path}")
+
+
+def _volumes(found: set[str], compose: dict, app_dir: str, data_root: str) -> None:
+    """Named volumes that are a host folder (driver_opts), use another driver, or
+    are a volume by name that may belong to another app."""
+    project = str(compose.get("name") or "")
+    for key, spec in (compose.get("volumes") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        name = str(spec.get("name") or "")
+        if spec.get("external"):
+            found.add(f"Existing volume {name or key}")
+        elif name and not (project and name.startswith(f"{project}_")):
+            found.add(f"Existing volume {name}")
+        driver = str(spec.get("driver") or "local")
+        options = spec.get("driver_opts") or {}
+        if driver != "local":
+            found.add(f"Volume driver {driver}")
+        elif isinstance(options, dict) and options:
+            if "bind" in str(options.get("o") or "").split(","):
+                _host_path(found, str(options.get("device") or ""), app_dir, data_root)
+            else:
+                found.add(f"Volume {key} mounts {options.get('device') or 'a device'}")
+
+
+def _files(found: set[str], compose: dict, app_dir: str, data_root: str) -> None:
+    """Secrets and configs from files: mounted into the container."""
+    for kind in ("secrets", "configs"):
+        for spec in (compose.get(kind) or {}).values():
+            if isinstance(spec, dict) and spec.get("file"):
+                _host_path(found, str(spec["file"]), app_dir, data_root)
+
+
 def host_access(compose: dict, app_dir: str, data_root: str) -> list[str]:
     """The host access a compose file asks for, in words, sorted (for comparing)."""
     found: set[str] = set()
-    for service in (compose.get("services") or {}).values():
+    services = compose.get("services") or {}
+    _volumes(found, compose, app_dir, data_root)
+    _files(found, compose, app_dir, data_root)
+    for service in services.values():
         if not isinstance(service, dict):
             continue
         if service.get("privileged"):
@@ -51,6 +100,20 @@ def host_access(compose: dict, app_dir: str, data_root: str) -> list[str]:
         ):
             if service.get(key) == "host":
                 found.add(words)
+        for key, words in (
+            ("network_mode", "network"),
+            ("pid", "processes"),
+            ("ipc", "shared memory"),
+        ):
+            value = str(service.get(key) or "")
+            if value.startswith("container:"):
+                found.add(f"The {words} of container {value.split(':', 1)[1]}")
+        for entry in _list(service.get("volumes_from")):
+            text = str(entry)
+            if text.startswith("container:"):
+                found.add(f"The files of container {text.split(':')[1]}")
+            elif text.split(":")[0] not in services:
+                found.add(f"The files of container {text.split(':')[0]}")
         for cap in _list(service.get("cap_add")):
             found.add(f"Capability {str(cap).upper().removeprefix('CAP_')}")
         for option in _list(service.get("security_opt")):
@@ -75,17 +138,7 @@ def host_access(compose: dict, app_dir: str, data_root: str) -> list[str]:
                 source = split_volume(volume)[0] or ""
             if not source or not is_bind_source(source):
                 continue
-            path = posixpath.normpath(posixpath.join(app_dir, source))
-            if path.endswith("docker.sock"):
-                found.add(f"Full control of Docker ({path})")
-            elif path == posixpath.normpath(data_root):
-                found.add(f"The data of all apps ({path})")
-            elif not (
-                _inside(path, app_dir)
-                or _inside(path, data_root)
-                or any(_inside(path, h) for h in HARMLESS)
-            ):
-                found.add(f"Host folder {path}")
+            _host_path(found, source, app_dir, data_root)
     return sorted(found)
 
 
