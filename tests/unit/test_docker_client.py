@@ -1,9 +1,11 @@
 # cspell:words niruix pgvectors pihole sshwifty
 
+import asyncio
 import struct
 
 import pytest
 
+from custom_components.docker_apps import _docker_client as docker_client_module
 from custom_components.docker_apps._docker_client import (
     DockerClient,
     DockerConnectionError,
@@ -237,3 +239,46 @@ async def test__timeout_gives_a_clear_error():
     client._session = SlowSession()
     with pytest.raises(DockerConnectionError, match="in time"):
         await client.async_images()
+
+
+class FakePull:
+    """A pull response: lines with a pause before each."""
+
+    def __init__(self, pauses: list[float]):
+        self.pauses = pauses
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    @property
+    def content(self):
+        async def lines():
+            for pause in self.pauses:
+                await asyncio.sleep(pause)
+                yield b'{"status": "Downloading"}\n'
+
+        return lines()
+
+
+async def pull(monkeypatch, pauses):
+    monkeypatch.setattr(docker_client_module, "PULL_STALL_SECONDS", 0.2)
+    client = DockerClient("unix:///var/run/docker.sock")
+
+    async def request(*args, **kwargs):
+        return FakePull(pauses)
+
+    monkeypatch.setattr(client, "_request", request)
+    return [m async for m in client.async_image_pull("app:1")]
+
+
+async def test__a_pull_without_progress_stops(monkeypatch):
+    with pytest.raises(DockerError, match="pull of app:1 stalled"):
+        await pull(monkeypatch, [0, 0, 1])
+
+
+async def test__a_slow_but_steady_pull_goes_on(monkeypatch):
+    # longer than the stall time in all, but never silent that long
+    assert len(await pull(monkeypatch, [0.1] * 6)) == 6

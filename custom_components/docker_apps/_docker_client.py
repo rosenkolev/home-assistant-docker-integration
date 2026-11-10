@@ -36,6 +36,8 @@ from ._models import (
 DEFAULT_SOCKET = "unix:///var/run/docker.sock"
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10)
 STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
+# a pull with no progress at all for this long has stalled
+PULL_STALL_SECONDS = 300
 
 
 class DockerError(Exception):
@@ -309,7 +311,21 @@ class DockerClient:
         except DockerError as err:
             raise pull_error(image, err) from err
         async with response:
-            async for line in response.content:
+            lines = aiter(response.content)
+            while True:
+                # Docker reports progress while a pull works; a pull that stalled
+                # (a registry or network hanging mid-layer) would wait forever
+                try:
+                    async with asyncio.timeout(PULL_STALL_SECONDS):
+                        line = await anext(lines)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as err:
+                    raise DockerError(
+                        504,
+                        f"pull of {image} stalled: no progress for "
+                        f"{PULL_STALL_SECONDS // 60} minutes",
+                    ) from err
                 line = line.strip()
                 if line:
                     message = json.loads(line)
