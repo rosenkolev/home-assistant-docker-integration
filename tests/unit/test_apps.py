@@ -509,3 +509,39 @@ def test__own_container_id_outside_a_container(tmp_path):
     mountinfo.write_text("22 1 0:21 / /proc rw - proc proc rw\n", encoding="utf-8")
     assert own_container_id(str(mountinfo)) is None
     assert own_container_id(str(tmp_path / "missing")) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc",
+        "/srv/../etc",
+        "//etc",
+        "/./proc",
+        "/dev/ttyUSB0",
+        "/var/run/docker.sock",
+        "/boot",
+        "/root/.ssh",
+        "/usr/bin",
+        "/lib64",
+        "/",
+        "",
+    ],
+)
+def test__system_paths_are_found_however_they_are_written(path):
+    assert apps_module.system_path(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/devices",
+        "/development/app",
+        "/srv/run",
+        "/running-data",
+        "/etcetera",
+        "/mnt/media",
+    ],
+)
+def test__folders_that_only_look_like_system_paths_are_fine(path):
+    assert not apps_module.system_path(path)

@@ -97,7 +97,22 @@ CACHE_IMAGES = ("redis", "valkey", "memcached", "keydb", "dragonfly")
 DEFAULT_UNTRACKED = DATABASE_IMAGES + CACHE_IMAGES
 PRIMARY_HINTS = ("server", "app", "web", "main")
 # host paths that are never offered or mounted as app folders
-SYSTEM_PATHS = ("/proc", "/sys", "/dev", "/run", "/var/run", "/var/lib", "/etc")
+SYSTEM_PATHS = (
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/var/run",
+    "/var/lib",
+    "/etc",
+    "/boot",
+    "/root",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+)
 VOLUMES_CACHE_SECONDS = 60
 OWN_CONTAINER = re.compile(r"/containers/([0-9a-f]{64})/hostname ")
 COMPOSE_FILES = (
@@ -303,12 +318,18 @@ def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str | None:
 
 
 def system_path(path: str | None) -> bool:
-    """Host paths that are not app data: /proc, /dev, the Docker socket, ..."""
+    """Host paths that are not app data: /proc, /dev, the Docker socket, ...
+
+    Compared as Docker sees them (`/srv/../etc` is /etc) and by whole folder
+    names (`/devices` is not /dev).
+    """
+    if not path:
+        return True
+    path = posixpath.normpath("/" + path.lstrip("/"))
     return (
-        not path
-        or path == "/"
+        path == "/"
         or path.endswith(".sock")
-        or path.startswith(SYSTEM_PATHS)
+        or any(path == p or path.startswith(p + "/") for p in SYSTEM_PATHS)
     )
 
 
