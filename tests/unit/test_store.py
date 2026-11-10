@@ -522,3 +522,21 @@ def test__store_fields_are_cleaned_to_their_type():
     assert [(v.key, v.type, v.min, v.label) for v in app.variables] == [
         ("GOOD", "text", None, "GOOD")
     ]
+
+
+def test__env_values_round_trip_through_the_env_file():
+    from custom_components.docker_apps._compose import parse_env_file
+
+    env = {
+        "A": "with space",
+        "B": "has # hash",
+        "C": "quote \" and ' both",
+        "D": "dollar $HOME",
+        "E": "back\\slash'",
+        "F": "",
+        "G": "\ttab at both ends\t",
+        "H": "tab\t#not a comment",
+        "I": r"password\t_more",
+        "J": r"quote' and \ and $HOME",
+    }
+    assert parse_env_file(format_env(env)) == env

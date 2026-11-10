@@ -741,3 +741,23 @@ async def test__data_files_with_a_generated_password_are_private(manager, monkey
     await manager.async_install_store_app(app, data=await manager.client.async_fetch())
     assert ("users.yml", True, (1000, 1000)) in calls
     assert ("config.yaml", False, None) in calls
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        ({"SECRET": "pw\nAPP_DATA_DIR=/"}, "SECRET can't contain a line break"),
+        ({"SECRET": "pw\rX=1"}, "line break"),
+        ({"X\nAPP_DATA_DIR": "/"}, "is not a variable name"),
+    ],
+)
+async def test__values_that_would_add_lines_to_env_are_refused(
+    manager, tmp_path, values, error
+):
+    data = await manager.client.async_fetch()
+    with pytest.raises(AppError, match=error):
+        await manager.async_install_store_app(
+            store_app("1.10.0", 3), values=values, data=data
+        )
+    assert not (tmp_path / "apps" / "whoami").exists()
+    assert not manager.client.containers

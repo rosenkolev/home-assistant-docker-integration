@@ -62,6 +62,7 @@ from ._registry import RegistryClient, RegistryError
 from ._selfupdate import RESULT_FILE, UP_TIMEOUT, async_start_self_update
 from ._store import (
     StoreApp,
+    check_env,
     format_env,
     published_ports,
     render_app,
@@ -1610,6 +1611,10 @@ class AppManager:
             # apps installed before fixed container names were renamed keep them
             rename = installed.get("renamed_containers", False) if installed else True
             compose, env = self._render(store_app, app_key, values, rename)
+            try:
+                check_env(env)  # before anything is written
+            except ValueError as err:
+                raise AppError(f"{store_app.name}: {err}") from err
             access = self._access(compose, env, app_key)
             if is_update:
                 allowed = await self._async_allowed_access(app_key)

@@ -101,7 +101,12 @@ def parse_env_file(text: str) -> dict[str, str]:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            value = (
+                value[1:-1]
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+                .replace("$$", "$")  # as docker compose reads it
+            )
         elif len(value) >= 2 and value[0] == value[-1] == "'":
             value = value[1:-1]
         elif " #" in value:
