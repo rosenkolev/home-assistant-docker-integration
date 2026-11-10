@@ -36,6 +36,7 @@ from ._models import (
     NEW_SUFFIX,
     OLD_SUFFIX,
 )
+from ._yaml import GuardedLoader
 from .const import _LOGGER
 
 LABEL_CONFIG_HASH = "com.docker.compose.config-hash"
@@ -153,7 +154,7 @@ class Reset:
     """`!reset`: removes the value of earlier files."""
 
 
-class ComposeLoader(yaml.SafeLoader):
+class ComposeLoader(GuardedLoader):
     """YAML loader that knows the compose merge tags `!override` and `!reset`."""
 
 

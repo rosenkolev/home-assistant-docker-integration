@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 import yaml
 
 from ._models import split_image
+from ._yaml import safe_load
 
 KIND_CASAOS = "casaos"
 KIND_RUNTIPI = "runtipi"
@@ -201,7 +202,7 @@ def web_endpoint(
 
 
 def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
-    data = yaml.safe_load(text) or {}
+    data = safe_load(text) or {}
     meta = data.get("x-casaos") or {}
     if not meta or not data.get("services"):
         return None
@@ -246,7 +247,7 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
 
 
 def render_casaos(app: StoreApp, project: str, data_dir: str, data_root: str) -> dict:
-    data = yaml.safe_load(app.compose or "") or {}
+    data = safe_load(app.compose or "") or {}
     data.pop("x-casaos", None)
     data["name"] = project
     for service in (data.get("services") or {}).values():
@@ -258,7 +259,7 @@ def render_casaos(app: StoreApp, project: str, data_dir: str, data_root: str) ->
     text = text.replace("/DATA/AppData/", f"{data_root}/").replace(
         "/DATA/", f"{data_root}/"
     )
-    return yaml.safe_load(text)
+    return safe_load(text)
 
 
 # --- Runtipi ---
@@ -278,7 +279,7 @@ def parse_runtipi(
     # Runtipi uses one file: docker-compose.yml in its new format (with x-runtipi),
     # else docker-compose.json. An old docker-compose.yml next to the json is kept
     # for old Runtipi versions only and is often out of date.
-    yml = (yaml.safe_load(compose_text) if compose_text else None) or {}
+    yml = (safe_load(compose_text) if compose_text else None) or {}
     if dynamic_text and not (isinstance(yml, dict) and "x-runtipi" in yml):
         compose = yaml.safe_dump(
             runtipi_dynamic_to_compose(json.loads(dynamic_text)),
@@ -306,7 +307,7 @@ def parse_runtipi(
         if field_.get("env_variable")
     ]
 
-    services = (yaml.safe_load(compose) or {}).get("services") or {}
+    services = (safe_load(compose) or {}).get("services") or {}
     main = next(
         (
             s
@@ -342,7 +343,7 @@ def parse_runtipi(
 def _publish_main_port(compose: str) -> str:
     """Schema v2 compose files mark the web UI with `x-runtipi: {is_main,
     internal_port}` instead of a port; Runtipi publishes it on APP_PORT."""
-    data = yaml.safe_load(compose) or {}
+    data = safe_load(compose) or {}
     changed = False
     for service in (data.get("services") or {}).values():
         meta = (isinstance(service, dict) and service.get("x-runtipi")) or {}
@@ -453,7 +454,7 @@ def _snake_keys(value):
 
 
 def render_runtipi(app: StoreApp, project: str) -> dict:
-    data = yaml.safe_load(app.compose or "") or {}
+    data = safe_load(app.compose or "") or {}
     data.pop("version", None)
     data["name"] = project
     for service in (data.get("services") or {}).values():
@@ -632,7 +633,7 @@ def format_env(env: dict[str, str]) -> str:
 
 
 def published_ports(compose_text: str) -> set[int]:
-    services = (yaml.safe_load(compose_text) or {}).get("services") or {}
+    services = (safe_load(compose_text) or {}).get("services") or {}
     return {
         int(published)
         for service in services.values()
@@ -698,12 +699,22 @@ _WANTED = {
     ),
 }
 _MAX_FILE = 512 * 1024
+# a repository is refused beyond these (Runtipi, the biggest, keeps ~2700 files)
+MAX_FILES = 20_000
+MAX_TEXT = 100 * 1024 * 1024
+MAX_UNPACKED = 2 * 1024 * 1024 * 1024
+
+
+class ArchiveTooBig(ValueError):
+    """A repository archive beyond the limits: refused, not read on."""
 
 
 def _read_archive(raw: bytes, kind: str) -> dict[str, str]:
     files: dict[str, str] = {}
+    kept = 0  # bytes of text kept
 
     def add(name: str, read: Callable[[], bytes | None]) -> None:
+        nonlocal kept
         path = _strip_root(name)
         parts = path.split("/")
         # Runtipi: apps/<id>/data/... is copied to the app's data folder; a path
@@ -716,22 +727,39 @@ def _read_archive(raw: bytes, kind: str) -> dict[str, str]:
         )
         if parts[-1] not in _WANTED[kind] and not data:
             return
+        if len(files) >= MAX_FILES:
+            raise ArchiveTooBig(f"repository is too big: more than {MAX_FILES} files")
         try:
             files[path] = (read() or b"").decode(
                 "utf-8", "strict" if data else "replace"
             )
         except UnicodeDecodeError:
-            pass  # a binary data file: left out
+            return  # a binary data file: left out
+        kept += len(files[path])
+        if kept > MAX_TEXT:
+            raise ArchiveTooBig(
+                f"repository is too big: more than {MAX_TEXT // 2**20} MB of files"
+            )
+
+    def unpacked(size: int) -> None:
+        if size > MAX_UNPACKED:
+            raise ArchiveTooBig(
+                f"repository is too big: more than {MAX_UNPACKED // 2**30} GB unpacked"
+            )
 
     if raw[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            for info in archive.infolist():
+            infos = archive.infolist()
+            unpacked(sum(info.file_size for info in infos))
+            for info in infos:
                 if not info.is_dir() and info.file_size <= _MAX_FILE:
                     add(info.filename, lambda info=info: archive.read(info))
         return files
 
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as archive:
         for member in archive:
+            # stops a small archive of endless filler before it is all unpacked
+            unpacked(member.offset_data + member.size)
             if member.isfile() and member.size <= _MAX_FILE:
                 add(
                     member.name,

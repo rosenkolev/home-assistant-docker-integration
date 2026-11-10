@@ -57,6 +57,7 @@ from ._paths import (
     write_text,
 )
 from ._access import check_store_files, host_access
+from ._yaml import safe_load
 from ._registry import RegistryClient, RegistryError
 from ._selfupdate import RESULT_FILE, UP_TIMEOUT, async_start_self_update
 from ._store import (
@@ -1744,7 +1745,7 @@ class AppManager:
         read outside its folder."""
         app_dir = self.store_paths(app_key)[0]
         try:
-            rendered = yaml.safe_load(interpolate(compose, env)) or {}
+            rendered = safe_load(interpolate(compose, env)) or {}
             check_store_files(rendered, app_dir)
         except (ComposeError, yaml.YAMLError, ValueError) as err:
             raise AppError(f"{app_key}: {err}") from err

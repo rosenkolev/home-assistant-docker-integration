@@ -4,9 +4,15 @@ import io
 import json
 import tarfile
 
+import pytest
 import yaml
 
+from custom_components.docker_apps import _store as store_module
+from custom_components.docker_apps._compose import load_yaml
+from custom_components.docker_apps._yaml import YamlTooBig, safe_load
+
 from custom_components.docker_apps._store import (
+    ArchiveTooBig,
     KIND_CASAOS,
     KIND_RUNTIPI,
     StoreApp,
@@ -410,3 +416,42 @@ def test__env_values_with_quotes_survive_a_round_trip():
         "E": "plain",
     }
     assert parse_env_file(format_env(values)) == values
+
+
+@pytest.mark.parametrize(
+    ("limit", "value", "error"),
+    [
+        ("MAX_FILES", 3, "more than 3 files"),
+        ("MAX_TEXT", 100, "MB of files"),
+        ("MAX_UNPACKED", 2000, "GB unpacked"),
+    ],
+)
+def test__a_repository_beyond_the_limits_is_refused(monkeypatch, limit, value, error):
+    monkeypatch.setattr(store_module, limit, value)
+    tipi = _tar(
+        {f"appstore-master/apps/app{i}/docker-compose.yml": "x" * 60 for i in range(5)}
+        | {"appstore-master/filler.bin": b"\0" * 3000}
+    )
+    with pytest.raises(ArchiveTooBig, match=error):
+        parse_archive(tipi, KIND_RUNTIPI, "r")
+
+
+def test__yaml_aliases_that_stand_for_billions_of_values_are_refused():
+    bomb = 'a: &a ["x","x","x","x","x","x","x","x","x","x"]\n'
+    for level in [chr(c) for c in range(ord("b"), ord("j"))]:
+        prev = chr(ord(level) - 1)
+        bomb += f"{level}: &{level} [{','.join([f'*{prev}'] * 10)}]\n"
+    with pytest.raises(YamlTooBig, match="too many values"):
+        safe_load(bomb)
+    with pytest.raises(YamlTooBig):
+        load_yaml(bomb)  # compose files too
+    with pytest.raises(YamlTooBig, match="refers to itself"):
+        safe_load("a: &a [*a]\n")
+
+
+def test__compose_anchors_still_work():
+    data = safe_load(
+        "x-common: &common\n  restart: always\nservices:\n"
+        "  a:\n    <<: *common\n    image: a\n  b:\n    <<: *common\n    image: b\n"
+    )
+    assert data["services"]["b"] == {"restart": "always", "image": "b"}

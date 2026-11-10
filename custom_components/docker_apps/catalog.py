@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from ._store import (
+    ArchiveTooBig,
     StoreApp,
     archive_urls,
     parse_archive,
@@ -77,6 +78,8 @@ async def async_fetch_repository(
             repository.id,
             raw_file_url(repository.url),
         )
+    except ArchiveTooBig as err:
+        raise CatalogError(f"{repository.url}: {err}") from err
     except (EOFError, tarfile.TarError, zipfile.BadZipFile) as err:
         raise CatalogError(f"{download}: broken archive: {err}") from err
     return apps, new_etag
