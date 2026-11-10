@@ -9,17 +9,54 @@
     {
       "label": "spell-check",
       "type": "shell",
-      "command": "npx -y cspell --no-progress \"**/*\""
+      "command": "git ls-files -co --exclude-standard | npx -y cspell --no-progress --no-summary --file-list stdin",
+      "detail": "project files only (git ignored ones are skipped)",
+      "windows": {
+        "command": "$OutputEncoding = [Text.UTF8Encoding]::new($false); git ls-files -co --exclude-standard | npx -y cspell --no-progress --no-summary --file-list stdin"
+      }
     },
     {
       "label": "lint",
       "type": "shell",
-      "command": "python -m ruff check ."
+      "command": ".venv/bin/python -m ruff check .",
+      "windows": {
+        "command": ".venv\\Scripts\\python.exe -m ruff check ."
+      }
+    },
+    {
+      "label": "format",
+      "type": "shell",
+      "command": ".venv/bin/python -m ruff format custom_components tests",
+      "windows": {
+        "command": ".venv\\Scripts\\python.exe -m ruff format custom_components tests"
+      }
     },
     {
       "label": "test",
       "type": "shell",
-      "command": "python -m pytest"
+      "command": ".venv/bin/python -m pytest tests -q -p no:warnings",
+      "windows": {
+        "command": ".venv\\Scripts\\python.exe -m pytest tests -q -p no:warnings"
+      }
+    },
+    {
+      "label": "check",
+      "detail": "format, lint, spell check and test",
+      "type": "shell",
+      "command": ".venv/bin/python -m ruff format custom_components tests && .venv/bin/python -m ruff check . && git ls-files -co --exclude-standard | npx -y cspell --no-progress --no-summary --file-list stdin && .venv/bin/python -m pytest tests -q -p no:warnings",
+      "windows": {
+        "command": "$OutputEncoding = [Text.UTF8Encoding]::new($false); .venv\\Scripts\\python.exe -m ruff format custom_components tests; if ($?) { .venv\\Scripts\\python.exe -m ruff check . }; if ($?) { git ls-files -co --exclude-standard | npx -y cspell --no-progress --no-summary --file-list stdin }; if ($?) { .venv\\Scripts\\python.exe -m pytest tests -q -p no:warnings }"
+      }
+    },
+    {
+      "label": "sandbox: deploy",
+      "detail": "copy the integration into the sandbox and restart Home Assistant",
+      "type": "process",
+      "command": "bash",
+      "args": ["scripts/sandbox.sh", "deploy"],
+      "windows": {
+        "command": "C:\\Program Files\\Git\\bin\\bash.exe"
+      }
     }
   ]
 }

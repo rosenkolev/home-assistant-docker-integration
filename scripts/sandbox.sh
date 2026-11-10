@@ -7,6 +7,8 @@
 #   scripts/sandbox.sh token   print an access token of the test account
 #   scripts/sandbox.sh tunnel [port...]  forward http://localhost:18123 and the app ports
 #                              to the sandbox (runs until stopped; restart it for new apps)
+#   scripts/sandbox.sh call SERVICE [JSON]  call a docker_apps service, print the answer
+#   scripts/sandbox.sh sh COMMAND  run a shell command in the sandbox Docker engine
 #   scripts/sandbox.sh down    remove the sandbox with all its containers, images and data
 #
 # Settings and the generated test account are kept in .sandbox.env (git ignored):
@@ -156,6 +158,14 @@ deploy)
   echo deployed
   ;;
 token) token ;;
+call)
+  data=${3:-'{}'}
+  printf %s "$data" | "${SSH[@]}" "curl -s -X POST http://127.0.0.1:$PORT/api/services/docker_apps/$2 \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer $(token)' --data-binary @- -w ' HTTP %{http_code}\n'"
+  ;;
+sh)
+  printf %s "$2" | remote '$D exec -i docker-apps-sandbox sh -s'
+  ;;
 tunnel)
   # the web ports of the sandbox apps too (or the ports given), through the
   # sandbox container's address on the host
