@@ -145,6 +145,7 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
     async def async_install(
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
+        # admins only: HA registers update.install, skip and clear_skipped so
         manager = self.runtime.manager
         history = manager.history_versions(self.app_key)
         if self.app is None:

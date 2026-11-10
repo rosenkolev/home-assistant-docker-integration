@@ -1,9 +1,11 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import Context
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
@@ -57,6 +59,47 @@ async def test__managed_app_should_update(hass, entry):
 
     await hass.services.async_call(
         "update", "install", {"entity_id": update_id}, blocking=True
+    )
+    await call(hass, "check_updates")
+    assert hass.states.get(update_id).attributes["installed_version"] == "v2.2.0"
+
+
+async def test__only_admins_update_apps_but_anyone_starts_them(
+    hass, entry, monkeypatch
+):
+    await call(hass, "manage", app="immich", managed=True)
+    (update_id,) = entity_ids(hass, entry, "update")
+    (switch_id,) = entity_ids(hass, entry, "switch")
+    # HA lets every user control every entity
+    control = SimpleNamespace(check_entity=lambda entity_id, policy: True)
+    users = {
+        "guest": SimpleNamespace(id="guest", is_admin=False, permissions=control),
+        "owner": SimpleNamespace(id="owner", is_admin=True, permissions=control),
+    }
+
+    async def get_user(user_id):
+        return users.get(user_id)
+
+    monkeypatch.setattr(
+        hass, "auth", SimpleNamespace(async_get_user=get_user), raising=False
+    )
+    guest, owner = users["guest"], users["owner"]
+    user = Context(user_id=guest.id)
+    # HA itself refuses update actions of non-admins (Unauthorized)
+    for service in ("install", "skip"):
+        with pytest.raises(HomeAssistantError, match="Unauthorized"):
+            await hass.services.async_call(
+                "update", service, {"entity_id": update_id}, blocking=True, context=user
+            )
+    assert hass.states.get(update_id).attributes["installed_version"] == "v2.1.0"
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": switch_id}, blocking=True, context=user
+    )
+    assert hass.states.get(switch_id).state == "off"
+
+    admin = Context(user_id=owner.id)
+    await hass.services.async_call(
+        "update", "install", {"entity_id": update_id}, blocking=True, context=admin
     )
     await call(hass, "check_updates")
     assert hass.states.get(update_id).attributes["installed_version"] == "v2.2.0"
