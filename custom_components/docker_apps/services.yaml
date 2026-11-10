@@ -163,6 +163,9 @@ install:
     values:
       selector:
         object:
+    use_existing_data:
+      selector:
+        boolean:
 uninstall:
   fields:
     app:

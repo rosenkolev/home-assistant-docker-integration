@@ -244,10 +244,62 @@ async def test__rollback_should_restore_files(setup, project):
     update = (await manager.async_check_updates(data, {}))["immich"]
     await manager.async_update(data.apps["immich"], update, data)
 
+    # edited by hand after the update
+    env = f"{project}/.env"
+    with open(env, "a", encoding="utf-8") as file:
+        file.write("MINE=1\n")
+
     data = await docker.async_fetch()
-    await manager.async_rollback(data.apps["immich"], "v2.1.0", data)
-    assert "IMMICH_VERSION=v2.1.0\n" in open(f"{project}/.env", encoding="utf-8").read()
-    assert manager.get("immich").history == []
+    await manager.async_rollback(data.apps["immich"], "v2.1.0", data, "v2.2.0")
+    assert "IMMICH_VERSION=v2.1.0\n" in open(env, encoding="utf-8").read()
+    # the version before the rollback, with the edit, is a backup to go forward to
+    history = manager.get("immich").history
+    assert [h["version"] for h in history] == ["v2.2.0"]
+
+    data = await docker.async_fetch()
+    await manager.async_rollback(data.apps["immich"], "v2.2.0", data)
+    assert "MINE=1" in open(env, encoding="utf-8").read()
+
+
+async def test__rollback_to_the_oldest_of_full_history(setup, project):
+    manager, docker, data = setup
+    app = data.apps["immich"]
+    for version in [f"v{i}" for i in range(1, apps_module.HISTORY_KEEP + 1)]:
+        with open(f"{project}/.env", "w", encoding="utf-8") as file:
+            file.write(f"IMMICH_VERSION={version}\n")
+        await manager._async_backup(
+            app, [*app.config_files, f"{project}/.env"], version
+        )
+    with open(f"{project}/.env", "w", encoding="utf-8") as file:
+        file.write("IMMICH_VERSION=v4\n")
+
+    await manager.async_rollback(app, "v1", data, "v4")
+    assert open(f"{project}/.env", encoding="utf-8").read() == "IMMICH_VERSION=v1\n"
+
+
+async def test__failed_rollback_stays_on_the_version_it_had(
+    setup, project, monkeypatch
+):
+    manager, docker, data = setup
+    await manager.async_configure("immich", managed=True)
+    update = (await manager.async_check_updates(data, {}))["immich"]
+    await manager.async_update(data.apps["immich"], update, data)
+    data = await docker.async_fetch()
+    apply = manager._async_apply
+    calls = []
+
+    async def first_apply_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:  # the earlier version doesn't come up
+            raise DockerError(500, "port is already allocated")
+        await apply(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_async_apply", first_apply_fails)
+    with pytest.raises(AppError, match="stays on the version it had"):
+        await manager.async_rollback(data.apps["immich"], "v2.1.0", data, "v2.2.0")
+    assert "IMMICH_VERSION=v2.2.0" in open(f"{project}/.env", encoding="utf-8").read()
+    # the backup of the earlier version is still there to try again
+    assert "v2.1.0" in [h["version"] for h in manager.get("immich").history]
 
 
 async def test__failed_pull_should_roll_back(setup, project, monkeypatch):
@@ -309,6 +361,8 @@ async def test__update_single_untracked_service(setup, project):
         "# keep this comment"
         in open(f"{project}/compose.yaml", encoding="utf-8").read()
     )
+    # the backup is named after the tag before, so it can be rolled back to
+    assert manager.history_versions("immich") == ["redis 8.0"]
 
 
 UPSTREAM = "https://example.com/{version}/docker-compose.yml"

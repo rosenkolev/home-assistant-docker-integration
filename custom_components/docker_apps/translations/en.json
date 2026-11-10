@@ -362,6 +362,10 @@
         "values": {
           "name": "Values",
           "description": "Values for the app variables."
+        },
+        "use_existing_data": {
+          "name": "Use existing data",
+          "description": "Use a data folder that already has files, for data moved from another server or CasaOS. Without it, such a folder is refused."
         }
       }
     },

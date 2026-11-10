@@ -61,7 +61,7 @@ from ._versions import is_floating, newest_tag, parse_tag, short_digest
 from .const import _LOGGER, DOMAIN
 
 STORAGE_VERSION = 1
-HISTORY_KEEP = 3
+HISTORY_KEEP = 6
 HEALTH_TIMEOUT = 300
 META_DIR = ".docker-apps"
 OVERRIDE_FILE = "compose.override.yaml"
@@ -97,6 +97,18 @@ COMPOSE_FILES = (
 
 class AppError(Exception):
     """An app operation failed."""
+
+
+class ExistingDataError(AppError):
+    """The data folder of a new install already has files: used only when the user
+    says so (data moved from another server or CasaOS)."""
+
+    def __init__(self, folder: str):
+        super().__init__(
+            f"The data folder `{folder}` already has files. Choose another name, "
+            "or use the existing files."
+        )
+        self.folder = folder
 
 
 class UpdateKeptError(AppError):
@@ -847,8 +859,13 @@ class AppManager:
                 changes[service] = result.latest if result.kind == "tag" else ""
         if not changes:
             raise AppError("the services are up to date")
+        # the backup is named after the tags now in use, so it can be rolled back to
+        before = ", ".join(
+            f"{service} {split_image(images[service][0])[1] or 'latest'}"
+            for service in changes
+        )
         await self._async_change_tags(
-            app, {s: t for s, t in changes.items() if t}, None, data
+            app, {s: t for s, t in changes.items() if t}, before, data
         )
         return changes
 
@@ -1010,15 +1027,44 @@ class AppManager:
         await self._async_apply(app.key, await self.async_load_model(app), data, False)
 
     async def async_rollback(
-        self, app: AppInfo, version: str, data: DockerData
+        self,
+        app: AppInfo,
+        version: str,
+        data: DockerData,
+        current: str | None = None,
     ) -> None:
-        entry = next(
-            (h for h in self.get(app.key).history if h.get("version") == version), None
-        )
+        """Bring back the files of an earlier version. The files now in use are
+        backed up first (as `current`), so hand edits stay and the user can go
+        forward again. When the earlier version doesn't come up, the rollback is
+        undone: the app stays on the version it had, for the user to fix."""
+        settings = self.get(app.key)
+        entry = next((h for h in settings.history if h.get("version") == version), None)
         if entry is None:
             raise AppError(f"no backup of version {version}")
         async with self._operation(app.key, "rollback"):
-            await self._async_restore(app, entry, data)
+            # out of the history first, so the backup below can't prune it
+            index = settings.history.index(entry)
+            settings.history.remove(entry)
+            store = dict(settings.store) if settings.store else None
+            now = await self._async_backup(
+                app,
+                [*app.config_files, f"{app.working_dir}/.env"],
+                current or (store or {}).get("version") or "before rollback",
+                store,
+            )
+            try:
+                await self._async_restore(app, entry, data)
+            except (AppError, ComposeError, DockerError, OSError) as err:
+                try:
+                    await self._async_restore(app, now, data)
+                except (AppError, ComposeError, DockerError, OSError) as undo:
+                    _LOGGER.error("%s can't be put back as it was: %s", app.key, undo)
+                settings.history.insert(index, entry)
+                await self.async_save()
+                raise AppError(
+                    f"rollback to {version} failed: {err}. {app.name} stays on the "
+                    "version it had."
+                ) from err
 
     # --- settings ---
 
@@ -1324,8 +1370,13 @@ class AppManager:
         values: dict[str, str] | None = None,
         is_update: bool = False,
         data: DockerData | None = None,
+        use_existing_data: bool = False,
     ) -> str:
-        """Install a store app, or install the new package of an installed one."""
+        """Install a store app, or install the new package of an installed one.
+
+        `use_existing_data` takes a data folder that already has files (data moved
+        from another server or CasaOS) instead of refusing it.
+        """
         if store_app.compose is None:
             raise AppError(f"{store_app.name} has no compose file")
         app_key = safe_id(app_key or store_app.name)
@@ -1357,7 +1408,9 @@ class AppManager:
                 # settings of an app whose containers were removed outside are stale
                 installed = None
                 self.settings.pop(app_key, None)
-                earlier = await self._check_folder(store_app, app_key)
+                earlier = await self._check_folder(
+                    store_app, app_key, use_existing_data
+                )
                 new_folders = [app_dir] if earlier is None else []
                 if not await self._async_exists(data_dir):
                     new_folders.append(data_dir)
@@ -1525,7 +1578,7 @@ class AppManager:
         if store_app.compose is None:
             return {"busy": [], "web_port": None}
         key = safe_id(name or store_app.name)
-        name_error, earlier = None, None
+        name_error, earlier, existing_data = None, None, None
         if other := self.installed_as(store_app, data):
             name_error = f"{store_app.name} is already installed as {other}."
         elif key in data.apps:
@@ -1533,6 +1586,8 @@ class AppManager:
         else:
             try:
                 earlier = await self._check_folder(store_app, key)
+            except ExistingDataError as err:
+                existing_data = err.folder  # the user decides in the dialog
             except AppError as err:
                 name_error = str(err)
         # a reinstall offers the web port of the earlier install
@@ -1568,6 +1623,7 @@ class AppManager:
             "web_port_taken": bool(web and web in busy),
             "requested_web_port": web,
             "name_error": name_error,
+            "existing_data": existing_data,
             "reinstall": earlier is not None,
             # the dialog shows these instead of the store defaults; generated
             # secrets are not asked, so they don't leave the server
@@ -1589,7 +1645,7 @@ class AppManager:
         return None
 
     async def _check_folder(
-        self, store_app: StoreApp, app_key: str
+        self, store_app: StoreApp, app_key: str, use_existing_data: bool = False
     ) -> dict[str, str] | None:
         """Whether a store app can go into its folders: None when they are missing
         or empty. An app folder with the manifest of the same store app is an earlier
@@ -1612,11 +1668,8 @@ class AppManager:
 
         def check() -> dict[str, str] | None:
             if empty(local):
-                if data_local and not empty(data_local):
-                    raise AppError(
-                        f"The data folder `{data_dir}` already has files. "
-                        "Choose another name."
-                    )
+                if data_local and not empty(data_local) and not use_existing_data:
+                    raise ExistingDataError(data_dir)
                 return None
             try:
                 owner = json.loads(read_text(f"{local}/{META_DIR}/manifest.json") or "")

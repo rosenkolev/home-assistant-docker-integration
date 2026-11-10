@@ -150,13 +150,17 @@ class AppUpdateEntity(AppEntity, UpdateEntity):
         if self.app is None:
             raise HomeAssistantError(f"app {self.app_key} is not running on Docker")
         try:
-            if version and version != self.latest_version:
-                if version not in history:
-                    raise HomeAssistantError(
-                        f"version {version} can't be installed; available for rollback: "
-                        f"{', '.join(history) or 'none'}"
-                    )
-                await manager.async_rollback(self.app, version, self.docker_data)
+            # a version with a backup is put back from it, also the latest one: the
+            # backup has the user's edits (rolling forward after a rollback)
+            if version and version != self.installed_version and version in history:
+                await manager.async_rollback(
+                    self.app, version, self.docker_data, self.installed_version
+                )
+            elif version and version != self.latest_version:
+                raise HomeAssistantError(
+                    f"version {version} can't be installed; available for rollback: "
+                    f"{', '.join(history) or 'none'}"
+                )
             elif self._update and self._update.has_update:
                 await manager.async_update(self.app, self._update, self.docker_data)
             else:

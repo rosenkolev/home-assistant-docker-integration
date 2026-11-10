@@ -254,6 +254,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                     app_key=call.data.get("name"),
                     values=call.data.get("values"),
                     data=runtime.docker.data,
+                    use_existing_data=call.data["use_existing_data"],
                 )
             )
         except HomeAssistantError as err:
@@ -380,6 +381,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required("store_app"): cv.string,
                 vol.Optional("name"): cv.string,
                 vol.Optional("values"): {cv.string: cv.string},
+                vol.Optional("use_existing_data", default=False): cv.boolean,
             },
         ),
         "uninstall": (

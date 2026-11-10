@@ -1320,7 +1320,13 @@ class DockerAppsPanel extends HTMLElement {
     );
     markdown(dialog, "#description", app.description || app.tagline);
     const installButton = dialog.querySelector("[data-r=install]");
+    // a data folder with files is used only when the user ticks it
+    let lastPorts;
+    let lastFirst;
+    let useExisting = false;
     const showPorts = (ports, first = false) => {
+      lastPorts = ports;
+      lastFirst = first;
       const notes = [];
       let blocked = false;
       if (ports.web_port_taken && ports.web_port !== ports.requested_web_port) {
@@ -1341,6 +1347,13 @@ class DockerAppsPanel extends HTMLElement {
       if (ports.name_error) {
         notes.push(["bad", esc(ports.name_error).replace(/`([^`]+)`/g, "<code>$1</code>")]);
         blocked = true;
+      } else if (ports.existing_data) {
+        notes.push([
+          useExisting ? "info" : "bad",
+          `The data folder <code>${esc(ports.existing_data)}</code> already has files. Use them for this app, for data moved from another server or CasaOS? The app gets new passwords, so a database in it may not open with them. Removing the app with its data later deletes this folder.
+           <label class="toggle"><input type="checkbox" id="use-existing" ${useExisting ? "checked" : ""}> Use the existing files</label>`,
+        ]);
+        blocked = blocked || !useExisting;
       } else if (ports.reinstall) {
         notes.push(["info", `An earlier install of ${esc(app.name)} is in this folder. It is installed again with its passwords and settings.`]);
         // the earlier values replace the store defaults in fields not edited yet
@@ -1360,6 +1373,11 @@ class DockerAppsPanel extends HTMLElement {
     let portCheck = 0; // only the newest port check may change the notes
     dialog.oninput = (ev) => {
       ev.target.classList.remove("invalid");
+      if (ev.target.id === "use-existing") {
+        useExisting = ev.target.checked;
+        showPorts(lastPorts, lastFirst);
+        return;
+      }
       if (ev.target.dataset.var !== "APP_PORT" && ev.target.id !== "app-name") return;
       clearTimeout(portTimer);
       const port = Number(dialog.querySelector("[data-var=APP_PORT]")?.value) || undefined;
@@ -1396,7 +1414,7 @@ class DockerAppsPanel extends HTMLElement {
       });
       const name = dialog.querySelector("#app-name").value;
       const installed = await this._save(dialog, button, "Installing…", () =>
-        this._call("install", { store_app: storeId, name, values }, true),
+        this._call("install", { store_app: storeId, name, values, use_existing_data: useExisting && Boolean(lastPorts?.existing_data) }, true),
       );
       if (installed) {
         this._toast(`${app.name} installed`);

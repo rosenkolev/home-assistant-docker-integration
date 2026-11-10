@@ -334,12 +334,20 @@ async def test__install_refuses_a_data_folder_with_files_of_someone_else(
     (mine / "photos.db").write_text("mine")
     data = await manager.client.async_fetch()
     ports = await manager.async_check_ports(store_app("1.10.0", 3), data)
-    assert "data folder `" in ports["name_error"]
+    assert ports["existing_data"].endswith("/data/whoami")  # the dialog asks
+    assert ports["name_error"] is None
 
     with pytest.raises(AppError, match="already has files"):
         await manager.async_install_store_app(store_app("1.10.0", 3), data=data)
     assert (mine / "photos.db").read_text() == "mine"
     assert not (tmp_path / "apps" / "whoami").exists()
+
+    # data moved from another server: the user says to use it
+    await manager.async_install_store_app(
+        store_app("1.10.0", 3), data=data, use_existing_data=True
+    )
+    assert (mine / "photos.db").read_text() == "mine"
+    assert (tmp_path / "apps" / "whoami" / ".docker-apps" / "manifest.json").exists()
 
 
 async def test__reinstall_uses_its_data_folder_again(manager, tmp_path):
