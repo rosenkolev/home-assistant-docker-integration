@@ -316,6 +316,37 @@ async def test__failed_pull_should_roll_back(setup, project, monkeypatch):
     assert "IMMICH_VERSION=v2.1.0\n" in open(f"{project}/.env", encoding="utf-8").read()
 
 
+async def test__failed_restore_keeps_the_backup_and_both_errors(
+    setup, project, monkeypatch
+):
+    manager, docker, data = setup
+    await manager.async_configure("immich", managed=True)
+    update = (await manager.async_check_updates(data, {}))["immich"]
+
+    async def apply_fails(*args, **kwargs):
+        raise DockerError(500, "port is already allocated")
+
+    async def pull_fails(*args, **kwargs):
+        raise DockerError(404, "The image does not exist")
+
+    monkeypatch.setattr(manager.engine, "async_pull", pull_fails)
+    apply = manager._async_apply
+
+    async def restore_fails(app_key, model, data, pull, **kwargs):
+        if not pull:  # putting back the backup
+            await apply_fails()
+        await apply(app_key, model, data, pull, **kwargs)
+
+    monkeypatch.setattr(manager, "_async_apply", restore_fails)
+    with pytest.raises(UpdateKeptError) as err:
+        await manager.async_update(data.apps["immich"], update, data)
+    assert "The image does not exist" in str(err.value)
+    assert "Putting back v2.1.0 failed too" in str(err.value)
+    assert "already allocated" in str(err.value)
+    # still there, to roll back to once the cause is fixed
+    assert manager.history_versions("immich") == ["v2.1.0"]
+
+
 @pytest.mark.parametrize("keeps_data", [True, False])
 async def test__failed_health_after_start_rolls_back_only_apps_without_data(
     setup, project, monkeypatch, keeps_data

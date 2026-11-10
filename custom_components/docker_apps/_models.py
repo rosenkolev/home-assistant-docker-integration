@@ -17,6 +17,12 @@ LABEL_HELPER = "io.github.rosenkolev.docker_apps.helper"
 LABEL_OCI_VERSION = "org.opencontainers.image.version"
 # name of a new container until the old one is removed
 NEW_SUFFIX = "-docker-apps-new"
+# name of the old Home Assistant container, kept stopped until the new one is up
+OLD_SUFFIX = "-docker-apps-old"
+
+
+def is_temporary(name: str) -> bool:
+    return name.endswith((NEW_SUFFIX, OLD_SUFFIX))
 
 
 @dataclass(kw_only=True)

@@ -34,6 +34,7 @@ from ._models import (
     LABEL_SERVICE,
     LABEL_WORKING_DIR,
     NEW_SUFFIX,
+    OLD_SUFFIX,
 )
 from .const import _LOGGER
 
@@ -1219,11 +1220,13 @@ class ComposeEngine:
         progress: Progress | None = None,
         skip: set[str] | None = None,
         started: list[str] | None = None,
+        kept: dict[str, str] | None = None,
     ) -> None:
         """Create or update the project, like `docker compose up -d`.
 
         `started` gets the services whose new container started: from then on the
-        new version may have changed its data (a database migration).
+        new version may have changed its data (a database migration). With `kept`,
+        a replaced container is stopped and kept instead of removed (service: id).
         """
         order = start_order(model, services)
         for name in order:
@@ -1249,7 +1252,13 @@ class ComposeEngine:
             if skip and name in skip:
                 continue
             running[name] = await self._apply_service(
-                model, name, by_service.get(name, []), running, force_recreate, started
+                model,
+                name,
+                by_service.get(name, []),
+                running,
+                force_recreate,
+                started,
+                kept,
             )
 
         if remove_orphans and services is None:
@@ -1267,6 +1276,7 @@ class ComposeEngine:
         running: dict[str, str],
         force: bool,
         started: list[str] | None = None,
+        kept: dict[str, str] | None = None,
     ) -> str:
         config = build_container_config(model, name, running)
         image = await self._async_image(config["Image"])
@@ -1279,7 +1289,7 @@ class ComposeEngine:
         old = []
         for raw in current:
             labels = raw.get("Labels") or {}
-            if raw.get("Names") == [f"/{temporary}"]:
+            if raw.get("Names") in ([f"/{temporary}"], [f"/{target}{OLD_SUFFIX}"]):
                 # left over from an earlier run that failed half way
                 await self.async_remove(raw["Id"])
             elif (
@@ -1307,12 +1317,20 @@ class ComposeEngine:
         )
         # create before removing the old container: a config that Docker refuses
         # leaves the running app as it is
+        replacing = bool(old)
         container_id = await self.client.async_container_create(
-            temporary if old else target, config
+            temporary if replacing else target, config
         )
+        if kept is not None and old:
+            # stopped and set aside, to be started again if the new one fails
+            await self.async_stop(old[0]["Id"])
+            await self.client.async_container_rename(
+                old[0]["Id"], f"{target}{OLD_SUFFIX}"
+            )
+            kept[name] = old.pop(0)["Id"]
         for raw in old:
             await self.async_remove(raw["Id"])
-        if old:
+        if replacing:
             await self.client.async_container_rename(container_id, target)
         networks = service_networks(model, model.services[name])
         for extra in list(networks)[1:]:
@@ -1326,13 +1344,17 @@ class ComposeEngine:
             started.append(name)
         return container_id
 
-    async def async_remove(self, container_id: str, volumes: bool = False) -> None:
-        """Stop gracefully (honors the stop timeout), then remove."""
+    async def async_stop(self, container_id: str) -> None:
+        """Stop gracefully (honors the stop timeout); a stopped one is fine."""
         try:
             await self.client.async_container_action(container_id, "stop")
         except DockerError as err:
             if err.status not in (304, 404):
                 raise
+
+    async def async_remove(self, container_id: str, volumes: bool = False) -> None:
+        """Stop gracefully, then remove."""
+        await self.async_stop(container_id)
         await self.client.async_container_remove(container_id, volumes)
 
     async def async_down(self, project: str, volumes: bool = False) -> None:

@@ -39,7 +39,14 @@ from ._compose import (
 )
 from ._compose_file import parse_services, update_service_tag
 from ._docker_client import DockerClient, DockerError, health_from_status
-from ._models import LABEL_PROJECT, LABEL_SERVICE, AppInfo, DockerData, split_image
+from ._models import (
+    LABEL_HELPER,
+    LABEL_PROJECT,
+    LABEL_SERVICE,
+    AppInfo,
+    DockerData,
+    split_image,
+)
 from ._paths import (
     PathMap,
     copy_file,
@@ -49,6 +56,7 @@ from ._paths import (
     write_text,
 )
 from ._registry import RegistryClient, RegistryError
+from ._selfupdate import RESULT_FILE, UP_TIMEOUT, async_start_self_update
 from ._store import (
     StoreApp,
     format_env,
@@ -63,6 +71,8 @@ from .const import _LOGGER, DOMAIN
 STORAGE_VERSION = 1
 HISTORY_KEEP = 6
 HEALTH_TIMEOUT = 300
+# how long the running Home Assistant waits for the outcome of its own update
+SELF_UPDATE_WATCH = UP_TIMEOUT + 300
 META_DIR = ".docker-apps"
 OVERRIDE_FILE = "compose.override.yaml"
 OVERRIDE_HEADER = "# Your changes to this app. Kept across updates.\n"
@@ -130,6 +140,26 @@ def update_kept(name: str, err: Exception) -> UpdateKeptError:
         "may already have changed its data. Check its logs; Roll back brings the "
         "earlier version back."
     )
+
+
+def self_update_message(result: dict) -> str:
+    """The notification for a Home Assistant update that didn't work."""
+    error = result.get("error") or "unknown error"
+    version = (result.get("backup") or {}).get("version") or "the earlier version"
+    files = (
+        f" Its compose files were put back to {version}."
+        if result.get("files_restored")
+        else " Its compose files still have the change: fix them before Home "
+        "Assistant is recreated."
+    )
+    if result.get("status") == "rolled_back":
+        return (
+            f"The new Home Assistant container did not come up: {error}. The "
+            f"previous container was started again.{files}"
+        )
+    if result.get("status") == "failed":
+        return f"Home Assistant was not updated: {error}. It kept running.{files}"
+    return f"The Home Assistant update failed: {error}.{files}"
 
 
 def compose_projects(folder: str) -> set[str]:
@@ -414,6 +444,80 @@ class AppManager:
             except DockerError as err:
                 _LOGGER.warning("Can't inspect the Home Assistant container: %s", err)
         self.paths = PathMap.from_inspect(self.self_inspect)
+
+    async def async_check_self_update(self) -> bool:
+        """Show the outcome of a Home Assistant update that the helper left (when
+        it didn't work); True when there was one."""
+        path = self.hass.config.path(RESULT_FILE)
+
+        def take() -> str | None:
+            text = read_text(path)
+            if text is not None:
+                remove_file(path)
+            return text
+
+        try:
+            text = await self.hass.async_add_executor_job(take)
+            result = json.loads(text) if text else None
+        except (OSError, ValueError) as err:
+            _LOGGER.warning(
+                "Can't read the result of the Home Assistant update: %s", err
+            )
+            return False
+        if not isinstance(result, dict):
+            return False
+        if result.get("status") == "updated":
+            _LOGGER.info("Home Assistant was updated")
+            return True
+        app_key = str(result.get("app"))
+        backup = result.get("backup") or {}
+        settings = self.settings.get(app_key)
+        if settings and result.get("files_restored"):
+            # the files are that backup again: it's the installed version now
+            entry = next(
+                (h for h in settings.history if h.get("dir") == backup.get("dir")), None
+            )
+            if entry is not None:
+                if entry.get("store"):
+                    settings.store = entry["store"]
+                settings.history.remove(entry)
+                await self.async_save()
+        persistent_notification.async_create(
+            self.hass,
+            self_update_message(result),
+            title="Docker Apps",
+            notification_id=f"{DOMAIN}_{app_key}",
+        )
+        _LOGGER.error("Home Assistant update: %s", result)
+        return True
+
+    async def async_check_self_update_at_start(self) -> None:
+        """The outcome of an update of this container, also when the helper is
+        still watching the new one (it writes the outcome after that)."""
+        if await self.async_check_self_update():
+            return
+        try:
+            containers = await self.client.async_containers()
+        except DockerError:
+            return
+        if any(
+            (c.get("Labels") or {}).get(LABEL_HELPER) and c.get("State") == "running"
+            for c in containers
+        ):
+            self._watch_self_update()
+
+    def _watch_self_update(self) -> None:
+        """Wait for the helper's outcome. A new container that comes up restarts
+        Home Assistant, which reads it at setup; one that doesn't come up never
+        stops this one."""
+
+        async def watch() -> None:
+            for _ in range(SELF_UPDATE_WATCH // 10):
+                await asyncio.sleep(10)
+                if await self.async_check_self_update():
+                    return
+
+        self.hass.async_create_background_task(watch(), f"{DOMAIN} self-update")
 
     async def async_save(self) -> None:
         await self._store.async_save(
@@ -787,8 +891,10 @@ class AppManager:
         pull: bool,
         force: bool = False,
         started: list[str] | None = None,
+        backup: dict | None = None,
     ) -> None:
-        """Pull (optional) and bring the project up; self-updates are handed off."""
+        """Pull (optional) and bring the project up; self-updates are handed off,
+        with the backup to put back when the new Home Assistant doesn't come up."""
         if pull:
             await self.engine.async_pull(model, progress=self._progress(app_key, 0, 60))
         ha_service = self.self_service(data, app_key)
@@ -800,9 +906,8 @@ class AppManager:
             started=started,
         )
         if ha_service:
-            from ._selfupdate import async_start_self_update
-
-            await async_start_self_update(self, model, ha_service)
+            if await async_start_self_update(self, app_key, model, ha_service, backup):
+                self._watch_self_update()
 
     async def async_app_action(
         self, app_key: str, data: DockerData, action: str
@@ -921,7 +1026,7 @@ class AppManager:
             started: list[str] = []
             try:
                 await self._async_apply(
-                    app.key, model, data, pull=True, started=started
+                    app.key, model, data, pull=True, started=started, backup=entry
                 )
                 if not self.self_service(data, app.key):
                     await self._async_wait_healthy(model.project)
@@ -929,8 +1034,7 @@ class AppManager:
                 # an app that keeps no data can always go back
                 if started and await self._async_keeps_data(model.project, started):
                     raise update_kept(app.name, err) from err
-                await self._async_restore(app, entry, data)
-                raise AppError(f"update failed and was rolled back: {err}") from err
+                raise await self._async_undo_update(app, entry, data, err) from err
             _LOGGER.info("Updated %s: %s", app.key, changes)
 
     async def _async_keeps_data(self, project: str, services: list[str]) -> bool:
@@ -1022,9 +1126,28 @@ class AppManager:
         settings = self.get(app.key)
         if entry.get("store"):
             settings.store = entry["store"]
+            await self.async_save()
+        await self._async_apply(app.key, await self.async_load_model(app), data, False)
+        # out of the history only now: when the app doesn't come up with it, the
+        # user can try again from the update entity
         settings.history = [h for h in settings.history if h is not entry]
         await self.async_save()
-        await self._async_apply(app.key, await self.async_load_model(app), data, False)
+
+    async def _async_undo_update(
+        self, app: AppInfo, entry: dict, data: DockerData, err: Exception
+    ) -> AppError:
+        """Put back the backup of a failed update; the error to raise tells how
+        that went, with the reason the update failed."""
+        try:
+            await self._async_restore(app, entry, data)
+        except (AppError, ComposeError, DockerError, OSError) as undo:
+            version = entry.get("version") or "the earlier version"
+            _LOGGER.error("%s: putting back %s failed: %s", app.key, version, undo)
+            return UpdateKeptError(
+                f"{app.name}: the update failed: {err}. Putting back {version} "
+                f"failed too: {undo}. Fix the cause, then roll back to {version}."
+            )
+        return AppError(f"update failed and was rolled back: {err}")
 
     async def async_rollback(
         self,
@@ -1461,7 +1584,7 @@ class AppManager:
                     )
                 model = await self.async_load_model(app)
                 await self._async_apply(
-                    app_key, model, data, pull=True, started=started
+                    app_key, model, data, pull=True, started=started, backup=backup
                 )
             except (AppError, ComposeError, DockerError, OSError) as err:
                 if backup is None:
@@ -1471,8 +1594,7 @@ class AppManager:
                     raise
                 # an app that keeps no data can always go back
                 if not (started and await self._async_keeps_data(app_key, started)):
-                    await self._async_restore(app, backup, data)
-                    raise AppError(f"update failed and was rolled back: {err}") from err
+                    raise await self._async_undo_update(app, backup, data, err) from err
                 # the new package stays and is recorded as installed
                 failure = update_kept(store_app.name, err)
             finally:

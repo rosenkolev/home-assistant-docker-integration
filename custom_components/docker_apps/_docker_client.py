@@ -23,13 +23,13 @@ from ._models import (
     LABEL_PROJECT,
     LABEL_SERVICE,
     LABEL_WORKING_DIR,
-    NEW_SUFFIX,
     AppInfo,
     ContainerInfo,
     ContainerStats,
     DiskUsage,
     DockerData,
     HostInfo,
+    is_temporary,
     split_image,
 )
 
@@ -498,10 +498,8 @@ def build_docker_data(info: dict, containers: list[dict]) -> DockerData:
         name = (raw.get("Names") or ["/" + raw["Id"][:12]])[0].lstrip("/")
         key, app_key = container_key(labels, name)
         # during an update the new container (NEW_SUFFIX) and the old one share
-        # a key for a moment: show the old one
-        if key in items and (
-            name.endswith(NEW_SUFFIX) or not items[key].name.endswith(NEW_SUFFIX)
-        ):
+        # a key for a moment: show the old one; after a self-update, the one in use
+        if key in items and (is_temporary(name) or not is_temporary(items[key].name)):
             continue
         project = labels.get(LABEL_PROJECT)
         status = raw.get("Status", "")
