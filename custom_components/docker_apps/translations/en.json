@@ -34,12 +34,17 @@
           "data_root": "App data folder",
           "read_only": "Read-only (monitor only, no actions)",
           "update_hours": "Update check interval",
-          "untracked_images": "Untracked images"
+          "untracked_images": "Untracked images",
+          "file_owner": "Owner of app files (uid:gid)"
         },
         "data_description": {
-          "untracked_images": "Comma separated parts of image names. Services with these images (databases by default) are not updated with their app, unless you track them per app."
+          "untracked_images": "Comma separated parts of image names. Services with these images (databases by default) are not updated with their app, unless you track them per app.",
+          "file_owner": "App files belong to this user and group, and apps run as it (PUID/PGID). Files with passwords can be read by it and nobody else, so a file browser or an editor running as this user can open them. Empty: files stay root's and only root reads passwords."
         }
       }
+    },
+    "error": {
+      "invalid_owner": "Use uid:gid with numbers, for example 1000:1000, or leave it empty."
     }
   },
   "config_subentries": {

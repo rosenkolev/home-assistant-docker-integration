@@ -84,6 +84,7 @@ async def async_start_self_update(
         "service": service,
         "docker_url": manager.client.url,
         "path_map": manager.paths.as_list(),
+        "owner": list(manager.owner) if manager.owner else None,
         "backup": {k: backup[k] for k in ("dir", "files", "version")}
         if backup
         else None,
@@ -136,7 +137,9 @@ async def async_wait_up(client: DockerClient, name: str) -> str | None:
         await asyncio.sleep(POLL)
 
 
-def restore_backup(backup: dict | None, paths: PathMap) -> bool:
+def restore_backup(
+    backup: dict | None, paths: PathMap, owner: list[int] | None = None
+) -> bool:
     """Put back the compose files of the backup; False when there is none."""
     if not backup:
         return False
@@ -144,7 +147,7 @@ def restore_backup(backup: dict | None, paths: PathMap) -> bool:
         source = paths.to_local(f"{backup['dir']}/{PurePosixPath(path).name}")
         target = paths.to_local(path)
         if source and target:
-            copy_file(source, target)
+            copy_file(source, target, tuple(owner) if owner else None)
     return True
 
 
@@ -205,7 +208,9 @@ async def _async_run(job: dict) -> dict:
                     f"; starting the previous container failed too: {undo}"
                 )
         try:
-            result["files_restored"] = restore_backup(job.get("backup"), paths)
+            result["files_restored"] = restore_backup(
+                job.get("backup"), paths, job.get("owner")
+            )
         except OSError as err:
             result["error"] += f"; the compose files were not put back: {err}"
         return result

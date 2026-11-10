@@ -35,6 +35,7 @@ from .const import (
     CONF_APPS_ROOT,
     CONF_DATA_ROOT,
     CONF_DOCKER_URL,
+    CONF_FILE_OWNER,
     CONF_READ_ONLY,
     CONF_REPO_KIND,
     CONF_REPO_URL,
@@ -43,11 +44,13 @@ from .const import (
     DEFAULT_APPS_ROOT,
     DEFAULT_DATA_ROOT,
     DEFAULT_DOCKER_URL,
+    DEFAULT_FILE_OWNER,
     DEFAULT_NAME,
     DEFAULT_UPDATE_HOURS,
     DOMAIN,
     KNOWN_REPOSITORIES,
     SUBENTRY_REPOSITORY,
+    parse_owner,
 )
 
 
@@ -162,13 +165,21 @@ class DockerAppsOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict | None = None) -> ConfigFlowResult:
         entry = self.config_entry
         current = {**entry.data, **entry.options}
+        errors: dict[str, str] = {}
         if user_input is not None:
             user_input[CONF_UNTRACKED] = [
                 part.strip().lower()
                 for part in user_input.get(CONF_UNTRACKED, "").split(",")
                 if part.strip()
             ]
-            return self.async_create_entry(data=user_input)
+            user_input[CONF_FILE_OWNER] = user_input.get(CONF_FILE_OWNER, "").strip()
+            try:
+                parse_owner(user_input[CONF_FILE_OWNER])
+            except ValueError:
+                errors[CONF_FILE_OWNER] = "invalid_owner"
+            if not errors:
+                return self.async_create_entry(data=user_input)
+            current = {**current, **user_input}
         untracked = current.get(CONF_UNTRACKED)
         if untracked is None:
             untracked = list(DEFAULT_UNTRACKED)
@@ -184,6 +195,10 @@ class DockerAppsOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_DATA_ROOT,
                         default=current.get(CONF_DATA_ROOT, DEFAULT_DATA_ROOT),
+                    ): str,
+                    vol.Optional(
+                        CONF_FILE_OWNER,
+                        default=current.get(CONF_FILE_OWNER, DEFAULT_FILE_OWNER),
                     ): str,
                     vol.Required(
                         CONF_READ_ONLY, default=current.get(CONF_READ_ONLY, False)
@@ -201,6 +216,7 @@ class DockerAppsOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
+            errors=errors,
         )
 
 

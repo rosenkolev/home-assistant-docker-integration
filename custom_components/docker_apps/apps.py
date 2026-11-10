@@ -50,6 +50,7 @@ from ._models import (
 from ._paths import (
     PathMap,
     copy_file,
+    is_private,
     read_text,
     remove_file,
     remove_tree,
@@ -415,8 +416,12 @@ class AppManager:
         data_root: str,
         untracked: list[str] | None = None,
         http=None,
+        owner: tuple[int, int] | None = None,
     ):
         self.hass = hass
+        # the user and group app files belong to (PUID/PGID of the apps too), so
+        # tools running as that user (a file browser, an editor) can open them
+        self.owner = owner
         self.client = client
         self.registry = registry
         self.http = http
@@ -434,7 +439,10 @@ class AppManager:
         self.self_container_id: str | None = None
         self.self_inspect: dict | None = None
         self.paths = PathMap(None)
-        self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.apps")
+        # private: it holds the generated passwords of all store apps
+        self._store = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.apps", private=True
+        )
         self._listeners: list[Callable[[], None]] = []
         self._locks: dict[str, asyncio.Lock] = {}
         self._volumes_cache: tuple[list[dict], float] | None = None
@@ -656,7 +664,11 @@ class AppManager:
 
     async def _write(self, host_path: str, content: str) -> None:
         await self.hass.async_add_executor_job(
-            write_text, self.local_path(host_path), content, host_path.endswith(".env")
+            write_text,
+            self.local_path(host_path),
+            content,
+            is_private(host_path),
+            self.owner,
         )
 
     async def async_load_model(
@@ -1120,6 +1132,7 @@ class AppManager:
                 if copy_file(
                     self.local_path(path),
                     self.local_path(f"{folder}/{PurePosixPath(path).name}"),
+                    self.owner,
                 )
             ]
 
@@ -1145,7 +1158,7 @@ class AppManager:
         def restore():
             for path in entry["files"]:
                 source = f"{entry['dir']}/{PurePosixPath(path).name}"
-                copy_file(self.local_path(source), self.local_path(path))
+                copy_file(self.local_path(source), self.local_path(path), self.owner)
 
         await self.hass.async_add_executor_job(restore)
         settings = self.get(app.key)
@@ -1676,6 +1689,11 @@ class AppManager:
         if not files:
             return
         local = self.local_path(f"{self.store_paths(app_key)[1]}/data")
+        secrets = [
+            env[v.key]
+            for v in store_app.variables
+            if v.type == "random" and env.get(v.key)
+        ]
 
         def write() -> None:
             data_dir = os.path.realpath(local)  # reads the disk: not in the loop
@@ -1687,10 +1705,14 @@ class AppManager:
                 while not os.path.exists(folder):
                     folders.append(folder)
                     folder = os.path.dirname(folder)
-                write_text(target, text)
-                # writable for the user the app runs as, as Runtipi does: apps
-                # change their config files and create files (a database) here
-                os.chmod(target, 0o666)
+                if any(secret in text for secret in secrets):
+                    # a generated password in it: the owner's (the app's PUID)
+                    write_text(target, text, private=True, owner=self.owner)
+                else:
+                    write_text(target, text)
+                    # writable for the user the app runs as, as Runtipi does:
+                    # apps change their config files and create files here
+                    os.chmod(target, 0o666)
                 for folder in folders:
                     os.chmod(folder, 0o777)
 
@@ -1711,8 +1733,8 @@ class AppManager:
             values,
             {
                 "TZ": str(self.hass.config.time_zone or "UTC"),
-                "PUID": "1000",
-                "PGID": "1000",
+                "PUID": str(self.owner[0] if self.owner else 1000),
+                "PGID": str(self.owner[1] if self.owner else 1000),
             },
             rename_containers,
         )

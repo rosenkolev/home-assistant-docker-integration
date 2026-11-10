@@ -722,3 +722,22 @@ async def test__store_app_never_reads_files_outside_its_folder(manager, extra):
         await manager.async_install_store_app(
             app_with(extra), data=data, allow_host_access=True
         )
+
+
+async def test__data_files_with_a_generated_password_are_private(manager, monkeypatch):
+    calls = []
+    real = apps_module.write_text
+    monkeypatch.setattr(
+        apps_module,
+        "write_text",
+        lambda path, text, private=False, owner=None: calls.append(
+            (path.replace("\\", "/").rsplit("/", 1)[-1], private, owner)
+        )
+        or real(path, text, private, owner),
+    )
+    manager.owner = (1000, 1000)
+    app = store_app("1.10.0", 3)
+    app.files = {"users.yml.template": "secret: {{SECRET}}", "config.yaml": "plain"}
+    await manager.async_install_store_app(app, data=await manager.client.async_fetch())
+    assert ("users.yml", True, (1000, 1000)) in calls
+    assert ("config.yaml", False, None) in calls

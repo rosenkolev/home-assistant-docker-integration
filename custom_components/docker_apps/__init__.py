@@ -27,6 +27,7 @@ from .const import (
     CONF_APPS_ROOT,
     CONF_DATA_ROOT,
     CONF_DOCKER_URL,
+    CONF_FILE_OWNER,
     CONF_READ_ONLY,
     CONF_REPO_KIND,
     CONF_REPO_URL,
@@ -35,11 +36,13 @@ from .const import (
     DEFAULT_APPS_ROOT,
     DEFAULT_DATA_ROOT,
     DEFAULT_DOCKER_URL,
+    DEFAULT_FILE_OWNER,
     DEFAULT_UPDATE_HOURS,
     DOMAIN,
     FRONTEND_URL,
     PANEL_URL,
     SUBENTRY_REPOSITORY,
+    parse_owner,
 )
 from .coordinator import (
     DiskCoordinator,
@@ -87,6 +90,14 @@ def _repositories(entry: DockerAppsConfigEntry) -> list[Repository]:
     ]
 
 
+def _owner(value: str | None) -> tuple[int, int] | None:
+    try:
+        return parse_owner(value)
+    except ValueError:
+        # the options form checks it; an older or edited entry falls back
+        return parse_owner(DEFAULT_FILE_OWNER)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -> bool:
     config = {**entry.data, **entry.options}
     client = DockerClient(config.get(CONF_DOCKER_URL, DEFAULT_DOCKER_URL))
@@ -107,6 +118,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DockerAppsConfigEntry) -
         config.get(CONF_DATA_ROOT, DEFAULT_DATA_ROOT),
         untracked=config.get(CONF_UNTRACKED),
         http=session,
+        owner=_owner(config.get(CONF_FILE_OWNER, DEFAULT_FILE_OWNER)),
     )
     await manager.async_setup()
     # how an update of this container went
