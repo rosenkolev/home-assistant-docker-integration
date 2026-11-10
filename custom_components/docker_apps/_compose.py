@@ -5,10 +5,12 @@ the standard `com.docker.compose.*` labels, so `docker compose`, Arcane, Dockge 
 Portainer still see the same projects. Covered: the common Compose spec subset
 (image, ports, volumes, devices, networks, network_mode, healthcheck, depends_on with
 conditions, env_file, profiles, extends, deploy resources, gpus, restart, logging,
-...). Not covered: `build`, `include`, swarm-only keys.
+secrets and configs from files, ...). Not covered: `build`, `include`, swarm-only
+keys; a service with a key it can't apply is refused instead of changed silently.
 """
 
-# cspell:words cpuset Dockge kmgt memswap nocopy Pids pstart Rootfs Sysctls Ulimits Userns
+# cspell:words Blkio cgroupns cpuset Dockge IOps kmgt memswap nocopy Pids pstart
+# cspell:words Realtime Rootfs swappiness Sysctls Ulimits Userns
 
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import yaml
 
@@ -46,6 +48,25 @@ ENGINE_VERSION = "docker-apps"
 ANONYMOUS = re.compile(r"[0-9a-f]{64}")
 HEALTH_TIMEOUT = 600
 SYSTEMPATHS_UNCONFINED = "systempaths=unconfined"
+
+# service keys the engine applies; others are refused, not dropped
+SUPPORTED_KEYS = frozenset(
+    """blkio_config cap_add cap_drop cgroup cgroup_parent command container_name
+    configs cpu_period cpu_quota cpu_rt_period cpu_rt_runtime cpu_shares cpus cpuset
+    depends_on deploy device_cgroup_rules devices dns dns_opt dns_search domainname
+    entrypoint env_file environment expose extends extra_hosts gpus group_add
+    healthcheck hostname image init ipc labels logging mac_address mem_limit
+    mem_reservation mem_swappiness memswap_limit network_mode networks
+    oom_kill_disable oom_score_adj pid pids_limit ports privileged profiles
+    pull_policy read_only restart runtime scale secrets security_opt shm_size
+    stdin_open stop_grace_period stop_signal storage_opt sysctls tmpfs tty ulimits
+    user userns_mode uts volumes volumes_from working_dir""".split()
+)
+# keys with no effect for a single Linux container here (`build`: the image is used)
+IGNORED_KEYS = frozenset(
+    """annotations attach build cpu_count cpu_percent credential_spec develop
+    isolation platform""".split()
+)
 
 _VAR = re.compile(
     r"\$(?:(?P<escaped>\$)|\{(?P<braced>[^}]+)\}|(?P<named>[A-Za-z_][A-Za-z0-9_]*))"
@@ -202,6 +223,7 @@ def merge(base, override):
                 "group_add",
                 "security_opt",
                 "device_cgroup_rules",
+                "dns_opt",
             ):
                 result[key] = list(
                     dict.fromkeys([*_as_list(result[key]), *_as_list(value)])
@@ -250,6 +272,8 @@ class ComposeModel:
     services: dict[str, dict]
     networks: dict[str, dict]
     volumes: dict[str, dict]
+    secrets: dict[str, dict] = field(default_factory=dict)
+    configs: dict[str, dict] = field(default_factory=dict)
 
     def resolve(self, path: str) -> str:
         """Resolve a host path relative to the project folder."""
@@ -306,6 +330,8 @@ def load_model(
         services=services,
         networks={k: v or {} for k, v in (data.get("networks") or {}).items()},
         volumes={k: v or {} for k, v in (data.get("volumes") or {}).items()},
+        secrets={k: v or {} for k, v in (data.get("secrets") or {}).items()},
+        configs={k: v or {} for k, v in (data.get("configs") or {}).items()},
     )
 
     if read_file is not None:
@@ -690,6 +716,7 @@ def build_container_config(
 
     `containers` maps service names to container ids for `network_mode: service:x`.
     """
+    check_service(model, service_name)
     service = model.services[service_name]
     exposed, bindings = parse_ports(service.get("ports"))
     for port in service.get("expose") or []:
@@ -756,7 +783,24 @@ def build_container_config(
         "OomScoreAdj": service.get("oom_score_adj"),
         "DeviceRequests": _device_requests(service, reservations),
         "VolumesFrom": service.get("volumes_from"),
+        "DeviceCgroupRules": service.get("device_cgroup_rules"),
+        "Runtime": service.get("runtime"),
+        "CgroupnsMode": service.get("cgroup"),
+        "CgroupParent": service.get("cgroup_parent"),
+        "CpuPeriod": _micros(service.get("cpu_period")),
+        "CpuQuota": _micros(service.get("cpu_quota")),
+        "CpuRealtimePeriod": _micros(service.get("cpu_rt_period")),
+        "CpuRealtimeRuntime": _micros(service.get("cpu_rt_runtime")),
+        "MemorySwappiness": service.get("mem_swappiness"),
+        "OomKillDisable": service.get("oom_kill_disable"),
+        "StorageOpt": _labels(service.get("storage_opt")) or None,
+        "DnsOptions": _as_list(service["dns_opt"]) if service.get("dns_opt") else None,
+        "UTSMode": service.get("uts"),
+        **_blkio(service.get("blkio_config")),
     }
+    mounts += _file_mounts(model, service, "secrets") + _file_mounts(
+        model, service, "configs"
+    )
     if mounts:
         host["Mounts"] = mounts
     if tmpfs := service.get("tmpfs"):
@@ -821,6 +865,95 @@ def build_container_config(
         config["HostConfig"]["ReadonlyPaths"] = []
     config["Labels"][LABEL_CONFIG_HASH] = config_hash(config)
     return config
+
+
+def check_service(model: ComposeModel, name: str) -> None:
+    """Refuse a service with keys the engine can't apply.
+
+    Dropping them would quietly change the app (a USB stick or the GPU gone after
+    an update), so the app is left as it is and the key is named instead.
+    """
+    service = model.services[name]
+    keys = [
+        key
+        for key in service
+        if key not in SUPPORTED_KEYS
+        and key not in IGNORED_KEYS
+        and not key.startswith(("x-", "_"))
+    ]
+    if service.get("scale") not in (None, 1):
+        keys.append("scale")
+    if keys:
+        raise ComposeError(
+            f"service '{name}': {', '.join(sorted(keys))} "
+            f"{'is' if len(keys) == 1 else 'are'} not supported; "
+            "remove it from the compose file"
+        )
+    for kind in ("secrets", "configs"):
+        _file_mounts(model, service, kind)
+
+
+def _file_mounts(model: ComposeModel, service: dict, kind: str) -> list[dict]:
+    """Secrets and configs from files, mounted read-only like docker compose does."""
+    defined = getattr(model, kind)
+    mounts = []
+    for item in service.get(kind) or []:
+        spec = {"source": item} if isinstance(item, str) else dict(item or {})
+        source = spec.get("source")
+        if source not in defined:
+            raise ComposeError(f"{kind[:-1]} '{source}' is not defined")
+        path = defined[source].get("file")
+        if not path:
+            raise ComposeError(f"{kind[:-1]} '{source}': only 'file' is supported")
+        target = str(spec.get("target") or source)
+        if not target.startswith("/"):
+            target = f"/run/secrets/{target}" if kind == "secrets" else f"/{target}"
+        mounts.append(
+            {
+                "Type": "bind",
+                "Source": model.resolve(path),
+                "Target": target,
+                "ReadOnly": True,
+            }
+        )
+    return mounts
+
+
+def _micros(value) -> int | None:
+    """CPU periods: microseconds, or a duration like `10ms`."""
+    if value is None:
+        return None
+    text = str(value)
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return int(duration_ns(text) / 1000)
+
+
+def _blkio(value: dict | None) -> dict:
+    if not value:
+        return {}
+
+    def rates(key: str, size: bool) -> list[dict] | None:
+        return [
+            {
+                "Path": d["path"],
+                "Rate": size_bytes(d["rate"]) if size else int(d["rate"]),
+            }
+            for d in value.get(key) or []
+        ] or None
+
+    return {
+        "BlkioWeight": value.get("weight"),
+        "BlkioWeightDevice": [
+            {"Path": d["path"], "Weight": int(d["weight"])}
+            for d in value.get("weight_device") or []
+        ]
+        or None,
+        "BlkioDeviceReadBps": rates("device_read_bps", True),
+        "BlkioDeviceWriteBps": rates("device_write_bps", True),
+        "BlkioDeviceReadIOps": rates("device_read_iops", False),
+        "BlkioDeviceWriteIOps": rates("device_write_iops", False),
+    }
 
 
 def _security_opt(service: dict) -> list[str] | None:
@@ -1093,6 +1226,8 @@ class ComposeEngine:
         new version may have changed its data (a database migration).
         """
         order = start_order(model, services)
+        for name in order:
+            check_service(model, name)  # before any container is touched
         await self._ensure_volumes(model)
         needed = set()
         for name in order:

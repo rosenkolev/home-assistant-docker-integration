@@ -1,4 +1,4 @@
-# cspell:words INITDB hwaccel rkmpp
+# cspell:words Blkio Cgroupns INITDB hwaccel rkmpp
 
 import pytest
 
@@ -354,6 +354,103 @@ async def test__engine_up_should_keep_the_old_container_when_create_fails():
     with pytest.raises(DockerError, match="invalid --security-opt"):
         await engine.async_up(m)
     assert docker.containers[old["Id"]]["State"] == "running"
+
+
+def test__build_container_config_passes_device_rules_runtime_and_limits():
+    compose = """
+services:
+  ha:
+    image: homeassistant
+    device_cgroup_rules: ["c 188:* rmw"]
+    runtime: nvidia
+    cgroup: host
+    cgroup_parent: apps
+    cpu_period: 100000
+    cpu_quota: 50000
+    cpu_rt_runtime: 10ms
+    mem_swappiness: 0
+    oom_kill_disable: true
+    storage_opt: {size: 1G}
+    dns_opt: [use-vc]
+    uts: host
+    blkio_config:
+      weight: 300
+      device_read_bps: [{path: /dev/sda, rate: 1mb}]
+      device_write_iops: [{path: /dev/sda, rate: 100}]
+    platform: linux/amd64
+    x-note: kept out
+"""
+    m = load_model("ha", "/srv/ha", {"/srv/ha/compose.yaml": compose}, None)
+    host = build_container_config(m, "ha")["HostConfig"]
+    assert host["DeviceCgroupRules"] == ["c 188:* rmw"]
+    assert host["Runtime"] == "nvidia"
+    assert host["CgroupnsMode"] == "host"
+    assert host["CgroupParent"] == "apps"
+    assert (host["CpuPeriod"], host["CpuQuota"]) == (100000, 50000)
+    assert host["CpuRealtimeRuntime"] == 10000
+    assert host["MemorySwappiness"] == 0
+    assert host["OomKillDisable"] is True
+    assert host["StorageOpt"] == {"size": "1G"}
+    assert host["DnsOptions"] == ["use-vc"]
+    assert host["UTSMode"] == "host"
+    assert host["BlkioWeight"] == 300
+    assert host["BlkioDeviceReadBps"] == [{"Path": "/dev/sda", "Rate": 1024**2}]
+    assert host["BlkioDeviceWriteIOps"] == [{"Path": "/dev/sda", "Rate": 100}]
+
+
+def test__new_keys_do_not_change_the_hash_of_apps_without_them():
+    # an app without them must not be recreated after this version is installed
+    host = build_container_config(model(), "redis")["HostConfig"]
+    assert not {"Runtime", "OomKillDisable", "DeviceCgroupRules"} & host.keys()
+
+
+def test__secrets_and_configs_from_files_are_mounted_read_only():
+    compose = """
+services:
+  app:
+    image: app
+    secrets: [db_password, {source: api_key, target: key.txt}]
+    configs: [{source: app_conf, target: /etc/app.conf}, plain]
+secrets:
+  db_password: {file: ./secrets/db.txt}
+  api_key: {file: /opt/key}
+configs:
+  app_conf: {file: app.conf}
+  plain: {file: plain.conf}
+"""
+    m = load_model("app", "/srv/app", {"/srv/app/compose.yaml": compose}, None)
+    mounts = build_container_config(m, "app")["HostConfig"]["Mounts"]
+    assert [(x["Source"], x["Target"], x["ReadOnly"]) for x in mounts] == [
+        ("/srv/app/secrets/db.txt", "/run/secrets/db_password", True),
+        ("/opt/key", "/run/secrets/key.txt", True),
+        ("/srv/app/app.conf", "/etc/app.conf", True),
+        ("/srv/app/plain.conf", "/plain", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extra", "error"),
+    [
+        ({"post_start": [{"command": "echo"}]}, "post_start is not supported"),
+        ({"links": ["db"], "scale": 2}, "links, scale are not supported"),
+        ({"secrets": ["missing"]}, "secret 'missing' is not defined"),
+        ({"configs": ["inline"]}, "config 'inline': only 'file' is supported"),
+    ],
+)
+async def test__unsupported_keys_are_refused_and_the_app_left_as_it_is(extra, error):
+    docker = FakeDocker()
+    engine = ComposeEngine(docker)
+    m = model()
+    await engine.async_up(m)
+    before = set(docker.containers)
+    docker.calls.clear()
+
+    m.configs["inline"] = {"content": "x"}
+    m.services["redis"].update(extra)
+    with pytest.raises(ComposeError, match=error):
+        await engine.async_up(m)
+    assert not docker.calls  # nothing created, removed or changed
+    assert set(docker.containers) == before
 
 
 async def test__engine_up_should_remove_orphans_and_down_should_clean_up():
