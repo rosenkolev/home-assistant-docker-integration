@@ -79,6 +79,24 @@ const markdown = (root, selector, text) => {
   }
 };
 
+// services of a store app, with what the store says about them and their
+// variables, ports and folders
+const serviceList = (services) =>
+  `<ul class="list">${services
+    .map((s) => {
+      const notes = [
+        ["Variable", s.envs],
+        ["Port", s.ports],
+        ["Folder", s.volumes],
+      ].flatMap(([kind, items]) =>
+        (items || []).map((i) => `<li><span class="muted">${kind}</span> <code>${esc(i.name)}</code>: ${esc(i.description)}</li>`),
+      );
+      return `<li><b>${esc(s.name)}</b> <span class="muted mono">${esc(s.image)}</span>
+        ${s.description ? `<div class="muted">${esc(s.description)}</div>` : ""}
+        ${notes.length ? `<ul class="notes">${notes.join("")}</ul>` : ""}</li>`;
+    })
+    .join("")}</ul>`;
+
 const iconButton = (action, name, title, { data = "", disabled = false, small = false } = {}) =>
   `<button class="icon-btn ${small ? "small" : ""}" title="${esc(title)}" aria-label="${esc(title)}" data-action="${action}" ${data} ${disabled ? "disabled" : ""}>${icon(name)}</button>`;
 
@@ -158,6 +176,7 @@ const STYLE = `
   .text { font-size: 14px; line-height: 1.5; }
   .hint { margin-top: 12px; }
   ul.list { margin: 0; padding-left: 20px; line-height: 1.8; font-size: 14px; }
+  ul.list ul.notes { margin: 0 0 4px; padding-left: 16px; line-height: 1.5; font-size: 13px; overflow-wrap: anywhere; }
 
   button.btn { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 8px; cursor: pointer; white-space: nowrap;
     border: 1px solid var(--divider-color); background: transparent; color: var(--primary-text-color); }
@@ -261,6 +280,25 @@ const STYLE = `
     background: #121212; color: #ddd; padding: 12px; border-radius: 10px; min-height: 320px; max-height: 55vh; overflow: auto; }
   .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; margin-bottom: 12px; font-size: 14px;
     background: rgba(var(--rgb-warning-color, 255,152,0), .12); }
+  .about { display: flex; flex-direction: column; gap: 16px; }
+  .about-head { display: flex; gap: 16px; align-items: center; }
+  .app-icon.big { width: 72px; height: 72px; border-radius: 16px; }
+  .app-icon.big ha-icon { --mdc-icon-size: 40px; }
+  .about-title { font-size: 22px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
+  .about .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px;
+    padding: 12px 14px; border-radius: 10px; background: var(--secondary-background-color); }
+  .facts dt { color: var(--secondary-text-color); }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .links:empty { display: none; }
+  .link-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 18px; font-size: 14px;
+    text-decoration: none; border: 1px solid var(--divider-color); color: var(--primary-color); }
+  .link-chip:hover { background: var(--secondary-background-color); }
+  .link-chip ha-icon { --mdc-icon-size: 18px; }
+  .notice.tips { margin: 0; background: rgba(var(--rgb-info-color, 3,169,244), .12); }
+  .notice.tips .md { background: none; padding: 0; max-height: none; }
+  .md.about-text { max-height: 40vh; background: none; padding: 0; }
   .empty { padding: 48px 16px; text-align: center; color: var(--secondary-text-color); }
   .empty.small { padding: 16px; }
   .grid > .empty { grid-column: 1 / -1; }
@@ -507,6 +545,7 @@ class DockerAppsPanel extends HTMLElement {
     }
 
     const menuItems = [
+      app.store ? ["about", "information-outline", "About…"] : null,
       ["launcher", app.launcher ? "checkbox-marked-outline" : "checkbox-blank-outline", "Show in app launcher"],
       app.configurable ? ["environment", "cog-outline", "Settings & passwords…"] : null,
       app.configurable ? ["volumes", "folder-multiple-outline", "Folders & volumes…"] : null,
@@ -541,7 +580,7 @@ class DockerAppsPanel extends HTMLElement {
             ${appIcon}
             <div class="grow">
               <div class="name">${esc(app.name)}</div>
-              <div class="muted ellipsis">${esc(version)}${this._state.apps.some((a) => a !== app && a.name === app.name) ? ` · <span class="mono" title="Folder">${esc(app.key)}</span>` : ""}</div>
+              <div class="muted ellipsis">${esc(version)}${this._state.apps.some((a) => a !== app && a.name === app.name) ? ` · <span class="mono" title="Folder">${esc(app.key)}</span>` : ""}${app.source ? ` · <span title="Installed from">${esc(app.source)}</span>` : ""}</div>
             </div>
             <span class="chip ${cls}">${esc(label)}</span>
           </div>
@@ -827,6 +866,9 @@ class DockerAppsPanel extends HTMLElement {
         case "settings":
           await this._settings(appInfo);
           break;
+        case "about":
+          await this._about(appInfo);
+          break;
         case "environment":
           await this._environment(appInfo);
           break;
@@ -1041,6 +1083,46 @@ class DockerAppsPanel extends HTMLElement {
       exclude: dialog.querySelector("#exclude").value,
     }));
     if (values) await this._call("manage", { app: app.key, managed: true, ...values });
+  }
+
+  async _about(app) {
+    const about = await this._ws("app/about", { app: app.key });
+    const link = (url, name, label) =>
+      url ? `<a class="link-chip" href="${esc(url)}" target="_blank" rel="noopener">${icon(name)}${esc(label)}</a>` : "";
+    const facts = [
+      ["Version", app.version],
+      ["Author", about.author],
+      ["Store", about.repository],
+    ].filter(([, value]) => value);
+    const appIcon = app.icon ? `<img class="app-icon big" src="${esc(app.icon)}" alt="">` : `<div class="app-icon big">${icon("layers-outline")}</div>`;
+    const dialog = this._dialog(
+      "About",
+      `<div class="about">
+        <div class="about-head">
+          ${appIcon}
+          <div class="grow">
+            <div class="about-title">${esc(app.name)}</div>
+            ${about.tagline ? `<div class="muted">${esc(about.tagline)}</div>` : ""}
+            ${about.categories.length ? `<div class="tags">${about.categories.map((c) => `<span class="chip off">${esc(c)}</span>`).join("")}</div>` : ""}
+          </div>
+        </div>
+        ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
+        <div class="links">
+          ${app.web ? link(webUrl(app.web), "open-in-new", "Open app") : ""}
+          ${link(about.website, "web", "Website")}
+          ${link(about.project, "source-branch", "Source code")}
+          ${link(about.repository_url, "store-outline", "Store repository")}
+        </div>
+        ${about.tips ? `<div class="notice tips">${icon("information-outline")}<div class="md grow" id="tips"></div></div>` : ""}
+        ${about.listed
+          ? `<div class="md about-text" id="description"></div>`
+          : `<div class="muted">The store no longer lists this app, so its description is not available.</div>`}
+      </div>`,
+      `<button class="btn primary" data-r="close">Close</button>`,
+      true,
+    );
+    markdown(dialog, "#tips", about.tips);
+    markdown(dialog, "#description", about.description || about.tagline);
   }
 
   async _environment(app) {
@@ -1329,11 +1411,11 @@ class DockerAppsPanel extends HTMLElement {
              <input data-var="${esc(v.key)}" type="${inputType[v.type] || "text"}" value="${esc(v.default || "")}" ${v.required ? "required" : ""}>`,
       )
       .join("");
-    const services = app.services.map((s) => `<li><b>${esc(s.name)}</b> <span class="muted mono">${esc(s.image)}</span></li>`).join("");
     const dialog = this._dialog(
       `Install ${app.name}`,
       `<div class="md" id="description"></div>
-       <h3>Containers</h3><ul class="list">${services}</ul>
+       ${app.tips ? `<h3>Notes</h3><div class="md" id="tips"></div><div class="muted hint">Shown again under About… on the app.</div>` : ""}
+       <h3>Containers</h3>${serviceList(app.services)}
        <label>Name (compose project)</label><input id="app-name" value="${esc(app.name.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, ""))}">
        ${app.web_port ? `<label>Web port</label><input data-var="APP_PORT" type="number" value="${esc(app.ports.web_port || app.web_port)}">` : ""}
        <div id="ports"></div>
@@ -1343,6 +1425,7 @@ class DockerAppsPanel extends HTMLElement {
       footer("Install", "install"),
     );
     markdown(dialog, "#description", app.description || app.tagline);
+    markdown(dialog, "#tips", app.tips);
     const installButton = dialog.querySelector("[data-r=install]");
     // a data folder with files is used only when the user ticks it
     let lastPorts;

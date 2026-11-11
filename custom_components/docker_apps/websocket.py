@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import asdict
 
 import voluptuous as vol
@@ -11,10 +12,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 
-from ._compose_file import parse_services
 from ._compose import ComposeError
 from ._docker_client import DockerError
 from ._models import LABEL_PROJECT, split_image
+from ._store import StoreApp, service_notes
 from .apps import AppError
 from .catalog import CatalogError
 from .const import DOMAIN
@@ -29,12 +30,36 @@ def async_register_websocket(hass: HomeAssistant) -> None:
         ws_store,
         ws_store_app,
         ws_store_ports,
+        ws_app_about,
         ws_app_environment,
         ws_app_volumes,
         ws_resources,
         ws_logs_subscribe,
     ):
         websocket_api.async_register_command(hass, command)
+
+
+def repository_name(runtime, store: dict | None) -> str | None:
+    """Name of the repository a store app came from; it can be removed since."""
+    if not store:
+        return None
+    repository = runtime.catalog.repositories.get(store.get("repo_id"))
+    return repository.name if repository else "a removed repository"
+
+
+def installed_from(runtime, store: dict | None) -> StoreApp | None:
+    """The store app an installed app came from, while its repository lists it."""
+    if not store:
+        return None
+    apps = runtime.catalog.apps
+    return apps.get(f"{store.get('repo_id')}.{store.get('app_id')}") or next(
+        (
+            a
+            for a in apps.values()
+            if a.repo_id == store.get("repo_id") and a.name == store.get("name")
+        ),
+        None,
+    )
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/state"})
@@ -94,6 +119,8 @@ def ws_state(
                 "launcher": manager.in_launcher(app.key),
                 "version": manager.display_version(app, data),
                 "store": bool(settings.store),
+                # the repository the app was installed from
+                "source": repository_name(runtime, settings.store),
                 "include": settings.include,
                 "exclude": settings.exclude,
                 "upstream": settings.upstream,
@@ -218,10 +245,7 @@ async def ws_store_app(
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, str(err))
         return
     detail = app.as_dict(with_compose=False)
-    detail["services"] = [
-        {"name": name, "image": spec.get("image")}
-        for name, spec in parse_services(app.compose or "").items()
-    ]
+    detail["services"] = service_notes(app.compose)
     detail["ports"] = await runtime.manager.async_check_ports(app, runtime.docker.data)
     connection.send_result(msg["id"], detail)
 
@@ -252,6 +276,47 @@ async def ws_store_ports(
             app, runtime.docker.data, msg.get("web_port"), msg.get("name")
         ),
     )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/app/about", vol.Required("app"): str}
+)
+@websocket_api.require_admin
+@callback
+def ws_app_about(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """What the store says about an installed app: description, tips, services."""
+    _, runtime = get_runtime(hass)
+    app = runtime.docker.data.apps.get(msg["app"])
+    if app is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "app not found")
+        return
+    store = runtime.manager.get(app.key).store or {}
+    listed = installed_from(runtime, store)
+    repository = runtime.catalog.repositories.get(store.get("repo_id"))
+    connection.send_result(
+        msg["id"],
+        {
+            "listed": listed is not None,
+            "tagline": listed.tagline if listed else "",
+            "description": listed.description if listed else "",
+            "tips": listed.tips if listed else "",
+            "categories": listed.categories if listed else [],
+            "author": listed.author if listed else "",
+            "website": listed.website if listed else None,
+            "project": listed.source if listed else None,
+            "repository": repository_name(runtime, store),
+            "repository_url": repository_page(repository.url) if repository else None,
+        },
+    )
+
+
+def repository_page(url: str) -> str | None:
+    """Web page of a store repository; a GitHub archive link goes to the project."""
+    if not url.startswith(("https://", "http://")):
+        return None
+    return re.sub(r"^(https://github\.com/[^/]+/[^/]+)/(archive|releases)/.*$", r"\1", url)
 
 
 @websocket_api.websocket_command(

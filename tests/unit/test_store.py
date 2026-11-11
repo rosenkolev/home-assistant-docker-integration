@@ -26,6 +26,7 @@ from custom_components.docker_apps._store import (
     render_files,
     runtipi_dynamic_to_compose,
     safe_id,
+    service_notes,
 )
 
 CASAOS = """
@@ -122,6 +123,57 @@ def test__parse_casaos_compose():
     assert app.supports("aarch64")
     assert not app.supports("riscv64")
     assert app.release_notes == "Bug fixes"
+    assert app.tips == ""
+
+
+def test__parse_casaos_compose_reads_tips_in_lowercase_locales():
+    data = yaml.safe_load(CASAOS)
+    data["x-casaos"]["tips"] = {"before_install": {"en_us": "Log in as admin"}}
+    data["x-casaos"]["description"] = {"zh_cn": "x", "en_us": "Media server"}
+    data["x-casaos"]["developer"] = "Jellyfin"
+    data["x-casaos"]["author"] = "IceWhale"
+    app = parse_casaos_compose(yaml.safe_dump(data), "repo")
+    assert app.tips == "Log in as admin"
+    assert app.description == "Media server"
+    assert app.author == "Jellyfin"
+
+
+def test__service_notes_lists_descriptions_of_variables_ports_and_folders():
+    data = yaml.safe_load(CASAOS)
+    data["services"]["jellyfin"]["x-casaos"] = {
+        "envs": [
+            {"container": "TZ", "description": {"en_us": "Time zone"}},
+            {"container": "PUID"},  # no description: left out
+            "bad",
+        ],
+        "ports": [{"container": "8096", "description": {"en_us": "Web UI"}}],
+        "volumes": [{"container": "/config", "description": "Settings"}],
+    }
+    data["services"]["db"] = {
+        "image": "postgres:16",
+        "x-docker-apps": {"description": "Holds the catalog"},
+    }
+    notes = service_notes(yaml.safe_dump(data, sort_keys=False))
+    assert notes == [
+        {
+            "name": "jellyfin",
+            "image": "linuxserver/jellyfin:12.2ubu2604-ls53",
+            "description": "",
+            "envs": [{"name": "TZ", "description": "Time zone"}],
+            "ports": [{"name": "8096", "description": "Web UI"}],
+            "volumes": [{"name": "/config", "description": "Settings"}],
+        },
+        {
+            "name": "db",
+            "image": "postgres:16",
+            "description": "Holds the catalog",
+            "envs": [],
+            "ports": [],
+            "volumes": [],
+        },
+    ]
+    assert service_notes(None) == []
+    assert service_notes("services: [") == []
 
 
 def test__render_casaos_maps_data_folders_and_drops_metadata():

@@ -64,11 +64,14 @@ class StoreApp:
     package_version: str
     tagline: str = ""
     description: str = ""
+    # notes for the user, such as the first login (CasaOS `tips.before_install`)
+    tips: str = ""
     icon: str | None = None
     categories: list[str] = field(default_factory=list)
     architectures: list[str] = field(default_factory=list)
     website: str | None = None
     source: str | None = None
+    author: str = ""  # who makes the app
     release_notes: str | None = None
     content_hash: str | None = None
     main_service: str | None = None
@@ -170,6 +173,7 @@ def _localized(value, locale: str = "en_US") -> str:
         value = (
             value.get(locale)
             or value.get("en_US")
+            or value.get("en_us")
             or value.get("en_GB")
             or next(iter(value.values()), "")
         )
@@ -294,11 +298,15 @@ def parse_casaos_compose(text: str, repo_id: str) -> StoreApp | None:
         package_version=_text(meta.get("version")) or _hash(text),
         tagline=_localized(meta.get("tagline")),
         description=_localized(meta.get("description")),
+        tips=_localized(tips.get("before_install"))
+        if isinstance(tips := meta.get("tips"), dict)
+        else "",
         icon=_link(meta.get("icon")),
         categories=_texts(meta.get("category")),
         architectures=_texts(meta.get("architectures")),
         website=_link(meta.get("website")),
         source=_link(meta.get("repo")),
+        author=_text(meta.get("developer")) or _text(meta.get("author")),
         release_notes=_localized(meta.get("release_notes")) or None,
         content_hash=_hash(text),
         main_service=main_name,
@@ -336,6 +344,46 @@ def render_casaos(
         "/DATA/", f"{data_root}/"
     )
     return safe_load(text)
+
+
+def service_notes(compose: str | None) -> list[dict]:
+    """Each service with its image and the notes a store gives for it: a
+    description (`x-docker-apps`), and what its variables, ports and folders are
+    for (CasaOS `x-casaos`). Installs drop these keys, so they come from the store."""
+    try:
+        data = safe_load(compose or "") or {}
+    except yaml.YAMLError:
+        return []
+    services = data.get("services") if isinstance(data, dict) else None
+    if not isinstance(services, dict):
+        return []
+    result = []
+    for name, spec in services.items():
+        spec = spec if isinstance(spec, dict) else {}
+        own = spec.get("x-docker-apps")
+        casaos = spec.get("x-casaos")
+        casaos = casaos if isinstance(casaos, dict) else {}
+        notes = {}
+        for kind in ("envs", "ports", "volumes"):
+            items = casaos.get(kind)
+            notes[kind] = [
+                {"name": _text(item.get("container")), "description": text}
+                for item in (items if isinstance(items, list) else [])
+                if isinstance(item, dict)
+                and _text(item.get("container"))
+                and (text := _localized(item.get("description")))
+            ]
+        result.append(
+            {
+                "name": str(name),
+                "image": _text(spec.get("image")),
+                "description": _localized(own.get("description"))
+                if isinstance(own, dict)
+                else "",
+                **notes,
+            }
+        )
+    return result
 
 
 # --- Runtipi ---
@@ -417,6 +465,7 @@ def parse_runtipi(
         architectures=_texts(config.get("supported_architectures")),
         website=_link(config.get("website")),
         source=_link(config.get("source")),
+        author=_text(config.get("author")),
         content_hash=_hash(config_text, compose),
         web_port=_port(config.get("port")) if web_target != 3001 else web_port,
         web_target=web_target,
