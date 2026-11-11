@@ -64,7 +64,7 @@ from .websocket import async_register_websocket
 
 PLATFORMS = [Platform.BUTTON, Platform.SENSOR, Platform.SWITCH, Platform.UPDATE]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PANEL_VERSION = "57"
+PANEL_VERSION = "58"
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:

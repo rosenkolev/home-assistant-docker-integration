@@ -1215,6 +1215,11 @@ class DockerAppsPanel extends HTMLElement {
 
     const showSuggestions = () => {
       const query = $("#source").value.toLowerCase();
+      // a folder already chosen: the list goes, so the field below is in reach
+      if (query && groups.some(([, items]) => items.some((i) => i.source.toLowerCase() === query))) {
+        suggest.hidden = true;
+        return;
+      }
       const html = groups
         .map(([title, items]) => {
           const matches = items.filter((i) => !query || i.source.toLowerCase().includes(query) || i.note.toLowerCase().includes(query));
@@ -1245,6 +1250,14 @@ class DockerAppsPanel extends HTMLElement {
         ev.preventDefault();
         ev.stopPropagation();
         suggest.hidden = true;
+      }
+      // Enter: on to the path in the app, filled in from the folder
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        suggest.hidden = true;
+        const source = $("#source").value.trim();
+        if (source && !$("#target").value.trim()) $("#target").value = defaultTarget(source);
+        $("#target").focus();
       }
     });
     // mousedown keeps the focus in the field while a suggestion is picked
